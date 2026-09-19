@@ -14,6 +14,11 @@ export function adminPanelHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wkbdy2api Console</title>
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Local administration console for the Wkbdy2api gateway.">
+<!-- Inline SVG favicon: a monogram tile. Kept as a data URI so the panel stays a
+     single self-contained document with no external asset to fetch or 404. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d1d1f'/%3E%3Cpath d='M8 9.5l2.6 13 2.6-8 2.6 8 2.6-13' fill='none' stroke='%23f5f5f7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: light dark;
@@ -230,17 +235,20 @@ h2 {
 .row-sub { font-size: 12px; color: var(--text-secondary); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-value { font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 
-/* ---- pills / badges ---- */
+/* ---- status tags ---- */
+/* Deliberately not pill-shaped: a rounded rectangle reads as a label, where a
+   full-radius pill reads as decoration. Same for the badges below. */
 .pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 99px;
+  padding: 2px 7px;
+  border-radius: 5px;
   flex-shrink: 0;
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
@@ -250,7 +258,6 @@ h2 {
 .pill.neutral::before { display: none; }
 
 /* ---- request log table ---- */
-.log-scroll { overflow-x: auto; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -271,6 +278,51 @@ th {
 td { padding: 9px 18px; border-top: 1px solid var(--divider); white-space: nowrap; }
 td.path { font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
 td .muted { color: var(--text-tertiary); }
+
+/* Any table sits in a scroll container so a wide row scrolls instead of
+   forcing the whole page sideways. The last column is pinned so the row action
+   stays reachable while the rest scrolls under it. */
+.table-wrap { overflow-x: auto; }
+.table-wrap th:last-child,
+.table-wrap td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--bg-raised);
+  box-shadow: -1px 0 0 var(--divider);
+}
+.table-wrap td:last-child { text-align: right; }
+/* Tables collapse to stacked rows when there is no room for columns. */
+@media (max-width: 720px) {
+  .table-wrap table, .table-wrap thead, .table-wrap tbody,
+  .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: auto; }
+  .table-wrap thead { display: none; }
+  .table-wrap tr {
+    border-top: 1px solid var(--divider);
+    padding: 10px 0;
+  }
+  .table-wrap tr:first-child { border-top: none; }
+  .table-wrap td {
+    border: none;
+    padding: 2px 18px;
+    white-space: normal;
+    display: flex;
+    gap: 10px;
+    position: static;
+    box-shadow: none;
+  }
+  .table-wrap td::before {
+    content: attr(data-label);
+    flex: 0 0 88px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding-top: 2px;
+  }
+  .table-wrap td:last-child { justify-content: flex-end; padding-top: 8px; }
+  .table-wrap td:last-child::before { content: none; }
+}
 
 /* ---- controls ---- */
 .controls { display: flex; gap: 10px; align-items: center; }
@@ -441,6 +493,73 @@ td .muted { color: var(--text-tertiary); }
 .btn-ghost { background: transparent; }
 .row-new { background: var(--accent-soft, var(--row-hover)); }
 .form-error { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 16px; }
+
+/* Page header: title on the left, the primary action on the right, so the
+   create form stays collapsed until it is actually wanted. */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.page-head .page-sub { max-width: 62ch; }
+
+/* Create form: hidden by default, revealed by the header action. */
+.create-panel {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--row-hover);
+}
+.create-panel[hidden] { display: none; }
+.create-panel .actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+.create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px;
+}
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.input {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--chrome-border);
+  border-radius: 8px;
+  outline: none;
+}
+.input:focus { border-color: var(--accent); }
+
+/* One-time key reveal: the whole reason this page exists, so it is the
+   loudest thing on it. */
+.reveal {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.reveal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.reveal-title { font-size: 13px; font-weight: 650; }
+.reveal-note { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; line-height: 1.55; }
+
+/* Row layout for each key, used instead of a table: a key has a name, a
+   secondary line, and a few figures, which reads better as a list. */
+.key-row { align-items: flex-start; }
+.key-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+/* Field labels in the key metadata line: muted so the values carry emphasis. */
+.key-meta b { font-weight: 500; color: var(--text-tertiary); }
+.key-prefix { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px; }
+.key-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.empty-state { padding: 20px 18px; font-size: 13px; color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -566,7 +685,7 @@ td .muted { color: var(--text-tertiary); }
   // ---------- formatting ----------
   function fmtInt(n) { return (n || 0).toLocaleString(); }
   function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
-  function fmtMs(n) { return n == null ? '—' : (n >= 1000 ? (n / 1000).toFixed(1) + ' s' : Math.round(n) + ' ms'); }
+  function fmtMs(n) { return n == null ? '-' : (n >= 1000 ? (n / 1000).toFixed(1) + ' s' : Math.round(n) + ' ms'); }
   function fmtUptime(ms) {
     var s = Math.floor(ms / 1000);
     var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -575,6 +694,19 @@ td .muted { color: var(--text-tertiary); }
   function fmtTime(ts) {
     var d = new Date(ts);
     return d.toLocaleTimeString(undefined, { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+  /**
+   * Lifespan-aware stamp for records that can be days old. fmtTime shows only
+   * a clock reading, which is fine inside one request-log burst but reads as
+   * today's time on a key created last week, so anything older than a day
+   * carries its date too.
+   */
+  function fmtStamp(ts) {
+    if (ts == null) return 'never';
+    var d = new Date(ts);
+    var sameDay = d.toDateString() === new Date().toDateString();
+    if (sameDay) return d.toLocaleTimeString(undefined, { hour12: false });
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -594,7 +726,7 @@ td .muted { color: var(--text-tertiary); }
   function unlockView() {
     return '<div class="unlock">' +
       '<h2>Wkbdy2api Console</h2>' +
-      '<p>Enter the gateway API key — the same Bearer key used for the /v1 endpoints. It is stored in this browser only.</p>' +
+      '<p>Enter the gateway API key. It is the same Bearer key used for the /v1 endpoints, and it is stored in this browser only.</p>' +
       '<input class="key-input" id="key-input" type="password" placeholder="wkb2api-local-key…" autocomplete="off">' +
       '<div class="key-error" id="key-error">' + (state.unlockError || '') + '</div>' +
       '<button class="btn" id="key-submit" style="width:100%">Unlock</button>' +
@@ -697,8 +829,8 @@ td .muted { color: var(--text-tertiary); }
       if (x.is_default) tags.push('<span class="pill neutral">default</span>');
       if (x.supports_tool_call) tags.push('tool');
       if (x.supports_images) tags.push('vision');
-      var maxIn = x.max_input_tokens ? (x.max_input_tokens >= 1000000 ? (x.max_input_tokens / 1000000) + 'M' : Math.round(x.max_input_tokens / 1000) + 'K') : '—';
-      var maxOut = x.max_output_tokens ? (x.max_output_tokens >= 1000 ? Math.round(x.max_output_tokens / 1000) + 'K' : x.max_output_tokens) : '—';
+      var maxIn = x.max_input_tokens ? (x.max_input_tokens >= 1000000 ? (x.max_input_tokens / 1000000) + 'M' : Math.round(x.max_input_tokens / 1000) + 'K') : '-';
+      var maxOut = x.max_output_tokens ? (x.max_output_tokens >= 1000 ? Math.round(x.max_output_tokens / 1000) + 'K' : x.max_output_tokens) : '-';
       return '<div class="row">' +
         '<div class="row-main"><div class="row-title" style="font-family:ui-monospace,Consolas,monospace;font-size:12px">' + escapeHtml(m.id) + '</div>' +
         '<div class="row-sub">' + escapeHtml(x.name || '') + (tags.length ? ' · ' + tags.join(' · ') : '') + '</div></div>' +
@@ -718,42 +850,79 @@ td .muted { color: var(--text-tertiary); }
   // recovery is to revoke and reissue.
 
   function viewKeysShell() {
-    return '<section class="section"><h2>API Keys</h2>' +
-      '<p class="page-sub">Keys authenticate <code>/v1</code> requests and the panel. Only a hash is stored, so a lost key cannot be recovered — revoke it and issue a new one.</p>' +
-      '<div id="key-banner"></div>' +
-      '<div class="card" style="padding:16px 18px;margin-bottom:16px">' +
-      '<div class="form-row"><label for="key-name">Name</label>' +
-      '<input class="input" id="key-name" type="text" placeholder="e.g. laptop, ci, teammate-name" autocomplete="off"></div>' +
-      '<div class="form-row"><label for="key-note">Note (optional)</label>' +
-      '<input class="input" id="key-note" type="text" placeholder="what this key is for" autocomplete="off"></div>' +
-      '<label class="check"><input type="checkbox" id="key-admin"> <span>Admin key — may manage the gateway (accounts, keys, settings)</span></label>' +
-      '<div class="actions"><button class="btn" id="key-create">Create key</button></div>' +
-      '<div id="key-error" class="form-error"></div>' +
+    return '<section class="section">' +
+      '<div class="page-head">' +
+        '<div>' +
+          '<h2>API Keys</h2>' +
+          '<p class="page-sub">Keys authenticate <code>/v1</code> requests and this console. Only a hash is stored, so a lost key cannot be recovered. Revoke it and issue a new one.</p>' +
+        '</div>' +
+        '<button class="btn" id="key-new" aria-expanded="false" aria-controls="key-create-panel">Create key</button>' +
       '</div>' +
-      '<div class="card" id="key-card"><div id="key-body" class="muted" style="color:var(--text-tertiary);padding:16px 18px;font-size:13px">Loading…</div></div>' +
+      '<div class="card" id="key-card">' +
+        '<div class="create-panel" id="key-create-panel" hidden>' +
+          '<div class="create-grid">' +
+            '<div class="field"><label for="key-name">Name</label>' +
+            '<input class="input" id="key-name" type="text" placeholder="laptop, ci, teammate" autocomplete="off"></div>' +
+            '<div class="field"><label for="key-note">Note (optional)</label>' +
+            '<input class="input" id="key-note" type="text" placeholder="What this key is for" autocomplete="off"></div>' +
+          '</div>' +
+          '<label class="check"><input type="checkbox" id="key-admin"> <span>Allow this key to manage the gateway (accounts, keys, settings)</span></label>' +
+          '<div class="actions">' +
+            '<button class="btn" id="key-create">Create key</button>' +
+            '<button class="btn btn-ghost" id="key-cancel">Cancel</button>' +
+          '</div>' +
+          '<div id="key-error" class="form-error"></div>' +
+        '</div>' +
+        '<div id="key-banner"></div>' +
+        '<div id="key-body"><div class="empty-state">Loading</div></div>' +
+      '</div>' +
       '</section>';
   }
 
   function loadKeys() {
     var create = $('#key-create');
     if (create) create.addEventListener('click', createKey);
+    var toggle = $('#key-new');
+    if (toggle) toggle.addEventListener('click', function () { setCreateOpen(toggle.getAttribute('aria-expanded') !== 'true'); });
+    var cancel = $('#key-cancel');
+    if (cancel) cancel.addEventListener('click', function () { setCreateOpen(false); });
     var name = $('#key-name');
     if (name) name.addEventListener('keydown', function (e) { if (e.key === 'Enter') createKey(); });
     return api('keys').then(function (d) {
       state.keys = d;
       renderKeyBanner();
-      renderKeyTable();
+      renderKeyList();
     }).catch(function () {});
   }
 
-  /** The one-time reveal, shown above the table after a successful create. */
+  /**
+   * The create form is collapsed until asked for: an operator visiting this page
+   * is usually checking or revoking a key, not making one.
+   */
+  function setCreateOpen(open) {
+    var panel = $('#key-create-panel');
+    var toggle = $('#key-new');
+    if (!panel) return;
+    panel.hidden = !open;
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      var name = $('#key-name');
+      if (name) name.focus();
+    } else {
+      var err = $('#key-error');
+      if (err) err.textContent = '';
+    }
+  }
+
+  /** The one-time reveal, shown above the list after a successful create. */
   function renderKeyBanner() {
     var host = $('#key-banner');
     if (!host) return;
     if (!state.newKey) { host.innerHTML = ''; return; }
-    host.innerHTML = '<div class="card" style="padding:16px 18px;margin-bottom:16px;border-color:var(--accent)">' +
-      '<div style="font-weight:600;margin-bottom:6px">Key created — copy it now</div>' +
-      '<p class="page-sub" style="margin:0 0 10px">' + escapeHtml(state.newKey.warning) + '</p>' +
+    host.innerHTML = '<div class="reveal">' +
+      '<div class="reveal-head"><span class="reveal-title">Copy this key now</span>' +
+      '<span class="pill warn">shown once</span></div>' +
+      '<p class="reveal-note">' + escapeHtml(state.newKey.warning) + '</p>' +
       '<div class="secret-row"><code id="new-key-value">' + escapeHtml(state.newKey.key) + '</code>' +
       '<button class="btn" id="key-copy">Copy</button>' +
       '<button class="btn btn-ghost" id="key-dismiss">Dismiss</button></div>' +
@@ -772,35 +941,52 @@ td .muted { color: var(--text-tertiary); }
     if (dismiss) dismiss.addEventListener('click', function () { state.newKey = null; renderKeyBanner(); });
   }
 
-  function renderKeyTable() {
+  /**
+   * Keys render as rows rather than table columns: each key carries a name, an
+   * optional note, and four short figures, which a six-column table could only
+   * fit by overflowing on every narrower window.
+   */
+  function renderKeyList() {
     var body = $('#key-body');
     if (!body || !state.keys) return;
+
+    function figures(k) {
+      return '<div class="key-meta">' +
+        '<span><b>Prefix</b> <code class="key-prefix">' + escapeHtml(k.prefix) + '</code></span>' +
+        '<span><b>Requests</b> ' + escapeHtml(String(k.request_count)) + '</span>' +
+        '<span><b>Last used</b> ' + escapeHtml(fmtStamp(k.last_used_at)) + '</span>' +
+        '<span><b>Created</b> ' + escapeHtml(fmtStamp(k.created_at)) + '</span>' +
+        '</div>';
+    }
+
     var rows = state.keys.keys.map(function (k) {
       var badge = k.admin
         ? '<span class="badge badge-admin">admin</span>'
         : '<span class="badge">api</span>';
-      var used = k.last_used_at ? fmtTime(k.last_used_at) : '<span class="muted">never</span>';
-      return '<tr' + (k.id === state.keys.just_created ? ' class="row-new"' : '') + '>' +
-        '<td>' + escapeHtml(k.name) + ' ' + badge + (k.note ? '<div class="muted" style="font-size:12px">' + escapeHtml(k.note) + '</div>' : '') + '</td>' +
-        '<td><code class="muted">' + escapeHtml(k.prefix) + '…</code></td>' +
-        '<td>' + k.request_count + '</td>' +
-        '<td>' + used + '</td>' +
-        '<td>' + fmtTime(k.created_at) + '</td>' +
-        '<td><button class="btn btn-ghost btn-danger" data-revoke="' + escapeHtml(k.id) + '" data-name="' + escapeHtml(k.name) + '">Revoke</button></td>' +
-        '</tr>';
+      return '<div class="row key-row' + (k.id === state.keys.just_created ? ' row-new' : '') + '">' +
+        '<div class="row-main">' +
+          '<div class="row-title">' + escapeHtml(k.name) + ' ' + badge + '</div>' +
+          (k.note ? '<div class="row-sub">' + escapeHtml(k.note) + '</div>' : '') +
+          figures(k) +
+        '</div>' +
+        '<div class="key-actions">' +
+          '<button class="btn btn-ghost btn-danger" data-revoke="' + escapeHtml(k.id) + '" data-name="' + escapeHtml(k.name) + '">Revoke</button>' +
+        '</div>' +
+        '</div>';
     }).join('');
 
-    var bootstrap = '<tr><td>' + escapeHtml(state.keys.bootstrap_key.name) + ' <span class="badge badge-admin">admin</span>' +
-      '<div class="muted" style="font-size:12px">' + escapeHtml(state.keys.bootstrap_key.note) + '</div></td>' +
-      '<td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td>' +
-      '<td><span class="muted">from env</span></td>' +
-      '<td><span class="muted">not revocable</span></td></tr>';
+    // The env key is not a stored record and cannot be revoked, so it is
+    // labelled rather than given a disabled button that would invite a click.
+    var bootstrap = '<div class="row key-row">' +
+      '<div class="row-main">' +
+        '<div class="row-title">' + escapeHtml(state.keys.bootstrap_key.name) + ' <span class="badge badge-admin">admin</span></div>' +
+        '<div class="row-sub">' + escapeHtml(state.keys.bootstrap_key.note) + '</div>' +
+        '<div class="key-meta"><span><b>Source</b> environment variable</span><span><b>Revoke</b> not possible from here</span></div>' +
+      '</div>' +
+      '</div>';
 
-    var table = rows.length
-      ? '<table><thead><tr><th>Name</th><th>Prefix</th><th>Requests</th><th>Last used</th><th>Created</th><th></th></tr></thead><tbody>' + rows + bootstrap + '</tbody></table>'
-      : '<table><thead><tr><th>Name</th><th>Prefix</th><th>Requests</th><th>Last used</th><th>Created</th><th></th></tr></thead><tbody>' + bootstrap + '</tbody></table>';
-
-    $('#key-card').innerHTML = table;
+    var list = rows || '<div class="empty-state">No keys yet. Create one to authenticate a client.</div>';
+    body.innerHTML = '<div class="rows">' + list + bootstrap + '</div>';
 
     Array.prototype.forEach.call(document.querySelectorAll('[data-revoke]'), function (btn) {
       btn.addEventListener('click', function () {
@@ -836,6 +1022,9 @@ td .muted { color: var(--text-tertiary); }
     var note = noteEl ? noteEl.value.trim() : '';
     if (note) payload.note = note;
 
+    var submit = $('#key-create');
+    if (submit) submit.disabled = true;
+
     api('keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
       .then(function (created) {
         state.newKey = created;
@@ -843,16 +1032,28 @@ td .muted { color: var(--text-tertiary); }
         if (nameEl) nameEl.value = '';
         if (noteEl) noteEl.value = '';
         if (adminEl) adminEl.checked = false;
+        // Collapse on success: the reveal above the list is the next thing to
+        // act on, and leaving the form open invites a duplicate submission.
+        setCreateOpen(false);
         return loadKeys();
       })
       .catch(function (err) {
+        // Keys are unique by name, so a rejected create is usually something the
+        // operator needs to fix and resubmit. Reopen so the fields stay in reach.
+        setCreateOpen(true);
         if (errorEl) errorEl.textContent = err.message || 'Could not create the key.';
+      })
+      .then(function () {
+        var btn = $('#key-create');
+        if (btn) btn.disabled = false;
       });
   }
 
-  function viewRequestsShell() {    return '<section class="section"><h2>Requests</h2>' +
-      '<p class="page-sub">Last ' + 200 + ' requests (cleared on restart).</p>' +
-      '<div class="card log-scroll" id="req-card"><div id="req-body" class="muted" style="color:var(--text-tertiary);padding:16px 18px;font-size:13px">Loading…</div></div></section>';
+  function viewRequestsShell() {
+    return '<section class="section">' +
+      '<div class="page-head"><div><h2>Requests</h2>' +
+      '<p class="page-sub">Last ' + 200 + ' requests. This buffer is cleared on restart.</p></div></div>' +
+      '<div class="card" id="req-card"><div id="req-body"><div class="empty-state">Loading</div></div></div></section>';
   }
 
   function loadRequests() {
@@ -860,7 +1061,7 @@ td .muted { color: var(--text-tertiary); }
       var body = $('#req-body');
       if (!body) return;
       if (!d.recent || d.recent.length === 0) {
-        body.innerHTML = 'No requests recorded yet.';
+        body.innerHTML = '<div class="empty-state">No requests recorded yet.</div>';
         return;
       }
       var trs = d.recent.map(function (r) {
@@ -868,12 +1069,16 @@ td .muted { color: var(--text-tertiary); }
         if (r.status >= 500) st = '<span style="color:var(--error);font-weight:600">' + r.status + '</span>';
         else if (r.status >= 400) st = '<span style="color:var(--warn);font-weight:600">' + r.status + '</span>';
         else if (r.status < 300) st = '<span style="color:var(--ok);font-weight:600">' + r.status + '</span>';
-        var tok = (r.prompt_tokens || r.completion_tokens) ? (r.prompt_tokens || 0) + ' / ' + (r.completion_tokens || 0) : '<span class="muted">—</span>';
-        return '<tr><td>' + fmtTime(r.time) + '</td><td class="path">' + escapeHtml(r.method + ' ' + r.path) +
+        var tok = (r.prompt_tokens || r.completion_tokens) ? (r.prompt_tokens || 0) + ' / ' + (r.completion_tokens || 0) : '<span class="muted">-</span>';
+        // data-label feeds the stacked layout on narrow screens, where the
+        // header row is hidden and each cell carries its own heading.
+        return '<tr><td data-label="Time">' + fmtTime(r.time) + '</td><td class="path" data-label="Request">' + escapeHtml(r.method + ' ' + r.path) +
           (r.model ? ' <span class="muted">· ' + escapeHtml(r.model) + (r.stream ? ' · stream' : '') + '</span>' : '') + '</td>' +
-          '<td>' + st + '</td><td>' + tok + '</td><td>' + fmtMs(r.duration_ms) + '</td></tr>';
+          '<td data-label="Status">' + st + '</td><td data-label="tok in/out">' + tok + '</td><td data-label="Duration">' + fmtMs(r.duration_ms) + '</td></tr>';
       }).join('');
-      $('#req-card').innerHTML = '<table><thead><tr><th>Time</th><th>Request</th><th>Status</th><th>tok in/out</th><th>Duration</th></tr></thead><tbody>' + trs + '</tbody></table>';
+      // Write into #req-body, not the card: overwriting the card would destroy
+      // the #req-body element itself and break every later refresh.
+      body.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Time</th><th>Request</th><th>Status</th><th>tok in/out</th><th>Duration</th></tr></thead><tbody>' + trs + '</tbody></table></div>';
     }).catch(function () {});
   }
 
@@ -892,7 +1097,7 @@ td .muted { color: var(--text-tertiary); }
         '</div>';
     }).join('');
     if (pool.size === 0) {
-      acctRows = '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">Account pool is empty — falling back to the single account in the local credential file</div></div></div>';
+      acctRows = '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">Account pool is empty. Falling back to the single account in the local credential file.</div></div></div>';
     }
 
     // Pool readiness banner. "Size > 0" is not the same as "usable": every
@@ -939,14 +1144,14 @@ td .muted { color: var(--text-tertiary); }
       '<p class="form-hint">Click to sign in on the official WorkBuddy web page; the gateway adds the account to the pool automatically. No desktop client to install and no token to copy. Passwords and verification codes are entered on the official page only.</p>' +
       '<label class="form-label" for="oauth-note">Account note (optional)</label><input class="key-input" id="oauth-note" maxlength="64" placeholder="e.g. work account">' +
       '<div class="controls"><button class="btn" id="oauth-start">Sign in to WorkBuddy</button><button class="btn secondary" id="oauth-cancel" hidden>Cancel sign-in</button></div>' +
-      '<p class="form-hint" id="oauth-status" role="status" aria-live="polite">The result appears here automatically — no refresh needed.</p>' +
+      '<p class="form-hint" id="oauth-status" role="status" aria-live="polite">The result appears here automatically. No refresh needed.</p>' +
       '<a id="oauth-link" class="form-hint" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden>Open the official sign-in page</a>' +
-      '<p class="form-hint">Accounts are stored encrypted and restored automatically after a gateway restart — no need to sign in again.</p>' +
+      '<p class="form-hint">Accounts are stored encrypted and restored automatically after a gateway restart, so you do not need to sign in again.</p>' +
       '</div></div>' +
       '<div class="card"><div class="card-header"><h3 class="card-title">Pool status</h3><span class="pill ' + (c.ok ? 'ok' : 'error') + '">' + (c.ok ? 'available' : 'unavailable') + '</span></div>' +
       '<div class="rows">' +
       '<div class="row"><div class="row-main"><div class="row-title">Source</div></div><div class="row-value">' + escapeHtml(c.source) + '</div></div>' +
-      '<div class="row"><div class="row-main"><div class="row-title">Credential status</div><div class="row-sub">' + escapeHtml(c.ok ? c.detail : 'Account pool is empty — sign in to WorkBuddy') + '</div></div></div>' +
+      '<div class="row"><div class="row-main"><div class="row-title">Credential status</div><div class="row-sub">' + escapeHtml(c.ok ? c.detail : 'Account pool is empty. Sign in to WorkBuddy.') + '</div></div></div>' +
       '</div></div>' +
       '<div class="card"><div class="card-header"><h3 class="card-title">Upstream endpoint</h3></div><div class="rows">' +
       '<div class="row"><div class="row-main"><div class="row-title">URL</div></div><div class="row-value" style="font-family:ui-monospace,Consolas,monospace;font-size:12px">' + escapeHtml(u.url) + '</div></div>' +
@@ -977,7 +1182,7 @@ td .muted { color: var(--text-tertiary); }
     var accounts = d.pool.accounts;
     var html = accounts.map(function (a) {
       return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div><div class="row-sub">' + escapeHtml(a.detail) + '</div></div><span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? 'available' : 'recovering') + '</span><button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '">Remove</button></div>';
-    }).join('') || '<div class="row"><div class="row-title">Account pool is empty — use the button below to sign in.</div></div>';
+    }).join('') || '<div class="row"><div class="row-title">Account pool is empty. Use the button below to sign in.</div></div>';
     if (rows.dataset.snapshot !== html) { rows.innerHTML = html; rows.dataset.snapshot = html; }
     document.querySelectorAll('[data-strategy]').forEach(function (button) {
       var selected = button.dataset.strategy === d.pool.strategy;
@@ -992,7 +1197,7 @@ td .muted { color: var(--text-tertiary); }
     start.disabled = state.oauthBusy || !!state.oauth;
     start.textContent = state.oauthBusy ? 'Preparing sign-in…' : 'Sign in to WorkBuddy';
     cancel.hidden = !state.oauth;
-    status.textContent = state.oauthMessage || 'The result appears here automatically — no refresh needed.';
+    status.textContent = state.oauthMessage || 'The result appears here automatically. No refresh needed.';
     link.hidden = !state.oauthUrl;
     if (state.oauthUrl) link.href = state.oauthUrl;
     else link.removeAttribute('href');
@@ -1015,7 +1220,7 @@ td .muted { color: var(--text-tertiary); }
         state.oauthUrl = '';
         state.oauthMessage = result.status === 'expired' ? 'Sign-in timed out. Start again.' : result.status === 'cancelled' ? 'Sign-in cancelled.' : 'Sign-in failed: ' + (result.error || 'try again');
       } else {
-        state.oauthMessage = result.status === 'pending' ? 'Waiting for you to finish signing in on the official page…' : 'Authorization received — confirming the account…';
+        state.oauthMessage = result.status === 'pending' ? 'Waiting for you to finish signing in on the official page…' : 'Authorization received. Confirming the account…';
         state.oauthTimer = setTimeout(pollOAuth, 1500);
       }
       updateOAuthView();
