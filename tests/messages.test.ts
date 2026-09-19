@@ -19,7 +19,26 @@ const textFixture = readFileSync(new URL('../fixtures/upstream-stream.redacted.t
 const toolFixture = readFileSync(new URL('../fixtures/upstream-tool-call.redacted.txt', import.meta.url), 'utf8');
 const models: ExposedModel[] = [{ id: MODEL, object: 'model', created: 0, owned_by: 'workbuddy', x_workbuddy: { is_default: true, max_output_tokens: 1000, supports_tool_call: true, supports_images: true } }];
 const apps: FastifyInstance[] = [];
-afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.close())); });
+afterEach(async () => {
+  // `app.close()` resolves only once every open connection has finished. The
+  // abort test deliberately leaves one request hanging on an upstream stream
+  // that never ends, so a plain close() blocks forever — which surfaced as
+  // "Hook timed out" in this file rather than as a failure inside the test that
+  // actually caused it.
+  //
+  // Drop the sockets first. `closeAllConnections` lives on the underlying Node
+  // server, not on the Fastify instance, and only exists once listen() has run.
+  await Promise.all(
+    apps.splice(0).map(async (app) => {
+      try {
+        app.server.closeAllConnections?.();
+      } catch {
+        // Never listened, or already shut down.
+      }
+      await app.close().catch(() => undefined);
+    }),
+  );
+});
 
 function setup(response: string | (() => Response | Promise<Response>) = textFixture, aliases?: Record<string, string>) {
   const upstream: Array<{ headers: Headers; body: UpstreamChatRequest; signal?: AbortSignal | null }> = [];
