@@ -7,8 +7,13 @@ logs
 secrets
 *.har
 *.pcap
-fixtures
-tests
+# `fixtures` and `tests` are deliberately NOT ignored.
+#
+# The build stage runs the suite (`pnpm typecheck && pnpm test`) and the tests
+# read from `fixtures/`, so excluding them here made every image build fail with
+# `"/fixtures": not found` — the COPY had nothing to copy. `.dockerignore` has no
+# per-stage syntax, so they have to stay in the context; the runtime stage keeps
+# them out of the shipped image simply by never copying them.
 scripts
 Dockerfile
 docker-compose.yml
