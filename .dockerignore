@@ -7,15 +7,22 @@ logs
 secrets
 *.har
 *.pcap
-# `fixtures` and `tests` are deliberately NOT ignored.
-#
-# The build stage runs the suite (`pnpm typecheck && pnpm test`) and the tests
-# read from `fixtures/`, so excluding them here made every image build fail with
-# `"/fixtures": not found` — the COPY had nothing to copy. `.dockerignore` has no
-# per-stage syntax, so they have to stay in the context; the runtime stage keeps
-# them out of the shipped image simply by never copying them.
 scripts
-Dockerfile
-docker-compose.yml
-.dockerignore
 README.md
+
+# --- files the image build needs, kept in the context on purpose ------------
+#
+# `.dockerignore` has no per-stage syntax, so anything ignored here is missing
+# from BOTH stages. The build stage runs the full suite
+# (`RUN pnpm typecheck && pnpm test`), which means every file the tests read has
+# to survive this list:
+#
+#   fixtures/            -> read by the streaming/chat/messages suites
+#   tests/               -> the suite itself
+#   Dockerfile,          -> scanned by tests/leak-scan.test.ts, whose whole job
+#   docker-compose.yml      is to prove no credential is baked into them
+#
+# Excluding any of these made the build fail: first `"/fixtures": not found` at
+# the COPY, then ENOENT from the leak scan. They are safe to leave in because the
+# runtime stage never copies them — it takes only `src`, the public config, and
+# the entrypoint — so nothing here reaches the shipped image.
