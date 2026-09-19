@@ -130,6 +130,30 @@ export class TelemetrySink {
   }
 
   /**
+   * Resolve once every record accepted so far has been written.
+   *
+   * Writes are queued fire-and-forget so a slow disk can never delay a
+   * response, which means the promise returned by `request()`/`pool()` says
+   * nothing about durability. Any caller that needs the file to be complete —
+   * a shutdown path, or a test asserting on the persisted contents — has to
+   * await this instead of guessing.
+   *
+   * Never rejects: `enqueue` already converts a failed write into the disabled
+   * state, and surfacing that here would turn a telemetry problem into a
+   * caller-visible failure.
+   */
+  async flush(): Promise<void> {
+    // Re-read `queue` until it stops changing. A single await is not enough:
+    // records enqueued while we were waiting are chained onto the queue we
+    // just observed, so one pass could return before they were written.
+    let seen: Promise<void>;
+    do {
+      seen = this.queue;
+      await seen.catch(() => undefined);
+    } while (seen !== this.queue);
+  }
+
+  /**
    * Read back persisted records, newest last. Used by the admin telemetry
    * endpoint and by tests; a malformed line is skipped rather than failing the
    * whole read, because a torn final line is expected after a hard kill.

@@ -153,7 +153,10 @@ function createFileStorage(opts: StorageOptions): Storage {
       // to distinguish "no recorded usage" from "usage is not queryable here".
       window: async () => null,
     },
-    close: async () => {},
+    // Drain queued telemetry appends before the process exits, so a graceful
+    // shutdown does not lose the last requests. Mirrors the Postgres backend,
+    // whose close() also flushes its buffer.
+    close: () => telemetry.flush(),
     describe: () => `file (accounts + ${telemetry.enabled ? opts.telemetryPath : 'telemetry disabled'})`,
   };
 }
@@ -238,6 +241,12 @@ function wrapSink(sink: TelemetrySink): TelemetryStore {
     pool: (record) => sink.pool(record),
     read: (limit) => sink.read(limit),
     aggregate: async () => null,
-    flush: async () => {},
+    // Forward to the sink: `TelemetrySink` queues appends fire-and-forget, so
+    // this is the only way a caller can wait for them. Leaving it as a no-op
+    // made the file backend silently lossy — `storage.close()` resolved while
+    // appends were still queued and the process exited, dropping the last
+    // requests of every run. The Postgres backend always drained; only this one
+    // pretended to.
+    flush: () => sink.flush(),
   };
 }

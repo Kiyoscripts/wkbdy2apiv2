@@ -117,14 +117,19 @@ jobs:
         run: |
           docker rm -f app pg || true
           docker network rm wkb-smoke || true
+
+  # The image builds with an account-store key that does not exist, so the
+  # gateway is expected to start with an empty pool and report itself
+  # NOT ready. That is the contract this job verifies: the container must
+  # stay up and answer probes honestly rather than exiting on boot.
+  #
+  # This is a separate job on purpose: it publishes 7891:7891 on the host, the
+  # same port `docker-smoke` uses, so the two cannot share a runner.
+  probe-contract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The image builds with an account-store key that does not exist, so the
-      # gateway is expected to start with an empty pool and report itself
-      # NOT ready. That is the contract this job verifies: the container must
-      # stay up and answer probes honestly rather than exiting on boot.
       - name: Build image
         run: docker build -t wkbdy2api:ci .
 

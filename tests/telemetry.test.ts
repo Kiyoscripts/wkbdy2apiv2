@@ -9,8 +9,28 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'wkb-telemetry-'));
 });
 afterEach(async () => {
+  // TelemetrySink writes are queued fire-and-forget, so a sink created in the
+  // test may still be appending (and calling mkdir) when this hook runs. Without
+  // draining first, `rm` races that write: the sink recreates the directory just
+  // after it is removed and the rmdir fails with ENOTEMPTY. Drain every sink the
+  // test created before cleaning up.
+  await Promise.all(sinks.splice(0).map((sink) => sink.flush()));
   await rm(dir, { recursive: true, force: true });
 });
+
+/** Sinks created since the last cleanup, drained by afterEach. */
+const sinks: Array<{ flush: () => Promise<void> }> = [];
+
+/**
+ * `createTelemetrySink` wrapper that records the sink for afterEach. Tests must
+ * use this rather than the raw factory, or their pending writes can outlive the
+ * test and race the temp-directory cleanup.
+ */
+function makeSink(...args: Parameters<typeof createTelemetrySink>): ReturnType<typeof createTelemetrySink> {
+  const sink = createTelemetrySink(...args);
+  sinks.push(sink);
+  return sink;
+}
 
 const record = (over: Partial<TelemetryRecord> = {}): TelemetryRecord => ({
   time: '2026-09-19T00:00:00.000Z',
@@ -47,7 +67,7 @@ async function settle(sinkPath: string, expected: number, timeoutMs = 2000): Pro
 describe('TelemetrySink', () => {
   it('persists one JSONL line per request', async () => {
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path });
+    const sink = makeSink({ path });
     sink.request(record({ request_id: 'req-1' }));
     sink.request(record({ request_id: 'req-2', status: 502, error_code: 'upstream_error' }));
 
@@ -62,11 +82,11 @@ describe('TelemetrySink', () => {
     // The whole point of the change. Previously the only record was an
     // in-memory ring buffer that vanished with the process.
     const path = join(dir, 'requests.jsonl');
-    const first = createTelemetrySink({ path });
+    const first = makeSink({ path });
     first.request(record({ request_id: 'before-restart' }));
     await settle(path, 1);
 
-    const second = createTelemetrySink({ path });
+    const second = makeSink({ path });
     const events = await second.read();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ record: { request_id: 'before-restart' } });
@@ -74,20 +94,20 @@ describe('TelemetrySink', () => {
 
   it('appends across sinks without losing earlier lines', async () => {
     const path = join(dir, 'requests.jsonl');
-    const a = createTelemetrySink({ path });
+    const a = makeSink({ path });
     a.request(record({ request_id: 'one' }));
     await settle(path, 1);
-    const b = createTelemetrySink({ path });
+    const b = makeSink({ path });
     b.request(record({ request_id: 'two' }));
     await settle(path, 2);
 
-    const events = await createTelemetrySink({ path }).read();
+    const events = await makeSink({ path }).read();
     expect(events.map((e) => (e.kind === 'request' ? e.record.request_id : ''))).toEqual(['one', 'two']);
   });
 
   it('records pool lifecycle events in the same timeline as requests', async () => {
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path });
+    const sink = makeSink({ path });
     sink.request(record({ request_id: 'req-1' }));
     sink.pool({ event: 'quarantined', label: 'acct-1', detail: 'attempt 2, cooldown 120s' });
     sink.pool({ event: 'restored', label: 'acct-1' });
@@ -101,7 +121,7 @@ describe('TelemetrySink', () => {
 
   it('redacts credentials before anything reaches disk', async () => {
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path });
+    const sink = makeSink({ path });
     // A hostile/incautious caller passes a token as the model name.
     sink.request(record({ model: 'Bearer sk-abcdefghijklmnopqrstuvwxyz012345' }));
 
@@ -112,7 +132,7 @@ describe('TelemetrySink', () => {
 
   it('returns the newest records when a limit is given', async () => {
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path });
+    const sink = makeSink({ path });
     for (let i = 0; i < 10; i += 1) sink.request(record({ request_id: `req-${i}` }));
     await settle(path, 10);
 
@@ -123,7 +143,7 @@ describe('TelemetrySink', () => {
   it('skips a torn final line instead of failing the whole read', async () => {
     // A hard kill mid-append leaves a partial line; the history must still load.
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path });
+    const sink = makeSink({ path });
     sink.request(record({ request_id: 'good' }));
     await settle(path, 1);
     await writeFile(path, (await readFile(path, 'utf8')) + '{"kind":"request","record":{"time":"2026-', 'utf8');
@@ -134,19 +154,19 @@ describe('TelemetrySink', () => {
   });
 
   it('is a no-op when the path is empty', async () => {
-    const sink = createTelemetrySink({ path: '' });
+    const sink = makeSink({ path: '' });
     expect(sink.enabled).toBe(false);
     sink.request(record());
     expect(await sink.read()).toEqual([]);
   });
 
   it('reads an absent file as an empty history', async () => {
-    expect(await createTelemetrySink({ path: join(dir, 'nope.jsonl') }).read()).toEqual([]);
+    expect(await makeSink({ path: join(dir, 'nope.jsonl') }).read()).toEqual([]);
   });
 
   it('rotates rather than growing without bound', async () => {
     const path = join(dir, 'requests.jsonl');
-    const sink = createTelemetrySink({ path, maxBytes: 300 });
+    const sink = makeSink({ path, maxBytes: 300 });
     for (let i = 0; i < 12; i += 1) sink.request(record({ request_id: `req-${i}` }));
     await new Promise((r) => setTimeout(r, 200));
 
@@ -158,7 +178,7 @@ describe('TelemetrySink', () => {
     // A path inside a file (not a directory) cannot be created.
     await writeFile(join(dir, 'blocker'), 'x', 'utf8');
     const errors: unknown[] = [];
-    const sink = createTelemetrySink({ path: join(dir, 'blocker', 'requests.jsonl'), onError: (e) => errors.push(e) });
+    const sink = makeSink({ path: join(dir, 'blocker', 'requests.jsonl'), onError: (e) => errors.push(e) });
     sink.request(record());
     sink.request(record());
     sink.request(record());

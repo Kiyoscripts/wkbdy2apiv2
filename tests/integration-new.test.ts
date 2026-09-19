@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { registryWith } from './helpers/api-key-registry.js';
 import { createMetrics } from '../src/observability/metrics.js';
@@ -65,13 +66,25 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'wkb-integration-'));
 });
 afterEach(async () => {
+  // TelemetrySink writes are queued fire-and-forget: the sink created by
+  // makeApp may still be appending (and calling mkdir) when this hook runs.
+  // Removing the directory first races that write — the sink recreates the
+  // directory just after it is gone and the rmdir fails with ENOTEMPTY. Close
+  // the apps and drain the sinks, then delete.
+  await Promise.all(apps.splice(0).map((app) => app.close()));
+  await Promise.all(sinks.splice(0).map((sink) => sink.flush()));
   await rm(dir, { recursive: true, force: true });
 });
+
+/** Apps and sinks created since the last cleanup. See afterEach. */
+const apps: FastifyInstance[] = [];
+const sinks: Array<{ flush: () => Promise<void> }> = [];
 
 function makeApp(pool: CredentialPool, client: WorkBuddyClient, extra: Record<string, unknown> = {}) {
   const metrics = createMetrics();
   const telemetryPath = join(dir, 'requests.jsonl');
   const telemetry = createTelemetrySink({ path: telemetryPath });
+  sinks.push(telemetry);
   metrics.setSink((entry) => telemetry.request(toTelemetryRecord(entry)));
   pool.setEventSink((event) => telemetry.pool(event));
   const app = buildApp({
@@ -88,6 +101,7 @@ function makeApp(pool: CredentialPool, client: WorkBuddyClient, extra: Record<st
     telemetryPath,
     ...extra,
   });
+  apps.push(app);
   return { app, metrics, telemetryPath };
 }
 
