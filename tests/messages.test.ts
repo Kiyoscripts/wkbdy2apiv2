@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { registryWith } from './helpers/api-key-registry.js';
 import { CredentialPool } from '../src/workbuddy/credential-pool.js';
 import { WorkBuddyClient } from '../src/workbuddy/client.js';
 import { createMetrics } from '../src/observability/metrics.js';
@@ -40,7 +41,7 @@ function setup(response: string | (() => Response | Promise<Response>) = textFix
       return typeof response === 'function' ? response() : new Response(response, { headers: { 'Content-Type': 'text/event-stream' } });
     }) as typeof fetch,
   });
-  const app = buildApp({ apiKey: KEY, models, client, pool, metrics, upstreamUrl: 'https://mock.invalid/v2/chat/completions', upstreamUa: 'test/1', startedAt: Date.now(), version: 'test', modelAliases: aliases });
+  const app = buildApp({ apiKey: KEY, apiKeys: registryWith(KEY), models, client, pool, metrics, upstreamUrl: 'https://mock.invalid/v2/chat/completions', upstreamUa: 'test/1', startedAt: Date.now(), version: 'test', modelAliases: aliases });
   apps.push(app);
   const request = (payload: unknown = { model: MODEL, max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }] }, headers: Record<string, string> = { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }) =>
     app.inject({ method: 'POST', url: '/v1/messages', payload: JSON.stringify(payload), headers: { 'content-type': 'application/json', ...headers } });

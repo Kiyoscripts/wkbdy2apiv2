@@ -6,6 +6,9 @@ import { openAiError, type ApiErrorCode } from '../openai/errors.js';
 import type { ExposedModel } from '../workbuddy/model-catalog.js';
 import type { MetricsCollector } from '../observability/metrics.js';
 import { createToolCallTracer } from '../observability/tool-trace.js';
+import { extractApiKey, keyFingerprint } from '../security/downstream-auth.js';
+import { createRecorder } from './request-context.js';
+import type { CredentialPool } from '../workbuddy/credential-pool.js';
 
 /**
  * Fields that would silently change semantics if accepted-and-dropped: a client
@@ -56,6 +59,10 @@ interface ChatOpts {
   client: WorkBuddyClient;
   metrics: MetricsCollector;
   tracer?: ReturnType<typeof createToolCallTracer>;
+  /** Credential source, used to attribute usage and failures to an account. */
+  pool?: CredentialPool;
+  /** Usage sink, used to charge per-key token quotas after a response completes. */
+  onUsage?: (usage: { keyId?: string; account?: string; model?: string; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }) => void;
   /** Sink for accepted-but-dropped field names. Defaults to a no-op. */
   onDroppedFields?: (fields: string[], requestId: string) => void;
 }
@@ -63,26 +70,29 @@ interface ChatOpts {
 export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): void {
   app.post('/chat/completions', async (req, reply) => {
     const startedAt = performance.now();
+    let model: string | undefined;
+    let streaming = false;
+    const recorder = createRecorder({
+      req,
+      path: '/v1/chat/completions',
+      metrics: opts.metrics,
+      startedAt,
+      keyId: keyFingerprint(extractApiKey(req.headers).value),
+      describe: () => ({
+        ...(model !== undefined ? { model } : {}),
+        stream: streaming,
+        ...(opts.pool?.describe() !== undefined ? { account: opts.pool.describe() } : {}),
+      }),
+    });
     const record = (entry: {
       status: number;
       prompt_tokens?: number;
       completion_tokens?: number;
       error_code?: string;
-    }) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      opts.metrics.record({
-        method: 'POST',
-        path: '/v1/chat/completions',
-        status: entry.status,
-        model: typeof body.model === 'string' ? body.model : undefined,
-        stream: body.stream === true,
-        duration_ms: Math.round(performance.now() - startedAt),
-        prompt_tokens: entry.prompt_tokens,
-        completion_tokens: entry.completion_tokens,
-        error_code: entry.error_code,
-      });
-    };
+    }) => recorder.finish(entry);
     const body = normalizeOpenAiRequestBody(req.body) as Record<string, unknown>;
+    streaming = body.stream === true;
+    model = typeof body.model === 'string' ? body.model : undefined;
     // ---- validate ---------------------------------------------------------
     for (const key of Object.keys(body)) {
       if (REJECTED_UNSUPPORTED.has(key)) {
@@ -128,8 +138,8 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
       return reply.code(err.statusCode).send(err.body);
     }
     const request = parsed.data;
-    const model = opts.models.find((m) => m.id === request.model);
-    if (!model) {
+    const entry = opts.models.find((m) => m.id === request.model);
+    if (!entry) {
       const err = openAiError(404, 'model_not_found', `Model '${request.model}' not found.`);
       record({ status: 404, error_code: 'model_not_found' });
       return reply.code(err.statusCode).send(err.body);
@@ -147,7 +157,7 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
     // ---- non-stream: upstream stream + local aggregation -----------------
     if (!request.stream) {
       try {
-        const stream = await opts.client.streamChatCompletion(upstreamBody, abort.signal);
+        const stream = await opts.client.streamChatCompletion(upstreamBody, abort.signal, true, false, recorder.attempts);
         const agg = new CompletionAggregator();
         for await (const chunk of stream) {
           opts.tracer?.upstream(req.id, chunk);
@@ -155,6 +165,7 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
         }
         const built = agg.build(request.model);
         opts.tracer?.aggregate(req.id, built.choices[0]?.message?.tool_calls);
+        opts.onUsage?.({ keyId: keyFingerprint(extractApiKey(req.headers).value), account: opts.pool?.describe(), model: request.model, usage: built.usage });
         record({
           status: 200,
           prompt_tokens: built.usage?.prompt_tokens,
@@ -162,8 +173,9 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
         });
         return built;
       } catch (err) {
-        record({ status: sendUpstreamError(reply, err).statusCode, error_code: mapUpstreamError(err).body.error.code });
-        return sendUpstreamError(reply, err);
+        const mapped = mapUpstreamError(err);
+        record({ status: mapped.statusCode, error_code: mapped.body.error.code });
+        return reply.code(mapped.statusCode).send(mapped.body);
       }
     }
 
@@ -183,7 +195,7 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
     };
     // status committed; upstream errors after this point go out as SSE error frames
     try {
-      const stream = await opts.client.streamChatCompletion(upstreamBody, abort.signal);
+      const stream = await opts.client.streamChatCompletion(upstreamBody, abort.signal, true, false, recorder.attempts);
       meta = { id: localCompletionId(), created: Math.floor(Date.now() / 1000), model: request.model };
       const includeUsage = request.stream_options?.include_usage === true;
       let pendingUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null = null;
@@ -199,7 +211,22 @@ export function chatCompletionsRoutes(app: FastifyInstance, opts: ChatOpts): voi
               total_tokens: chunk.usage.total_tokens ?? 0,
             };
           }
-          recordStream(200, pendingUsage ?? undefined);
+          // Charge quota on the full usage regardless of whether the client
+          // asked for the usage chunk: the tokens were spent either way.
+          opts.onUsage?.({
+            keyId: keyFingerprint(extractApiKey(req.headers).value),
+            account: opts.pool?.describe(),
+            model: request.model,
+            usage: {
+              prompt_tokens: chunk.usage.prompt_tokens ?? 0,
+              completion_tokens: chunk.usage.completion_tokens ?? 0,
+              total_tokens: chunk.usage.total_tokens ?? 0,
+            },
+          });
+          recordStream(200, {
+            prompt_tokens: chunk.usage.prompt_tokens ?? 0,
+            completion_tokens: chunk.usage.completion_tokens ?? 0,
+          });
           const usageOnlyChunk: typeof chunk = { ...chunk, usage: null };
           const converted = toOpenAiChunk(usageOnlyChunk, meta);
           if (converted) {

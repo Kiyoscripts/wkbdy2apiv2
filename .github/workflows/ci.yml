@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned to the LTS line the Dockerfile uses. package.json allows
+          # >=20, so without this CI and production could run different majors.
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  # The Postgres backend is the one that must not be taken on trust: its SQL is
+  # built from a column list at runtime, so a mismatch between the migration and
+  # the INSERT only shows up when a row is actually written. This job runs the
+  # storage tests against a real server rather than the in-process double.
+  postgres-storage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: wkb
+          POSTGRES_PASSWORD: wkb
+          POSTGRES_DB: wkbdy2api
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wkb -d wkbdy2api"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Storage and migration round trip against real Postgres
+        env:
+          WKB2API_TEST_DATABASE_URL: postgres://wkb:wkb@127.0.0.1:5432/wkbdy2api
+        run: pnpm exec vitest run tests/postgres-live.test.ts
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production image
+        run: docker build -t wkbdy2api:ci .
+      # The image must boot the way Render runs it: key from an environment
+      # variable and state in Postgres. This is the configuration that cannot be
+      # exercised by the unit suite, because it depends on the real entrypoint,
+      # the real config loader, and a real database.
+      - name: Start Postgres for the smoke test
+        run: |
+          docker network create wkb-smoke
+          docker run -d --name pg --network wkb-smoke \
+            -e POSTGRES_USER=wkb -e POSTGRES_PASSWORD=wkb -e POSTGRES_DB=wkbdy2api \
+            postgres:17-alpine
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U wkb -d wkbdy2api && break
+            sleep 1
+          done
+      - name: Boot with an env-supplied key and no mounted secret
+        run: |
+          docker run -d --name app --network wkb-smoke -p 7891:7891 \
+            -e WKB2API_API_KEY=ci-smoke-test-key-0123456 \
+            -e WKB2API_ACCOUNT_STORE_KEY_B64="$(head -c 32 /dev/urandom | base64 -w0)" \
+            -e WKB2API_STORAGE_BACKEND=postgres \
+            -e WKB2API_DATABASE_URL="postgres://wkb:wkb@pg:5432/wkbdy2api" \
+            -e WKB2API_DATABASE_SSL=false \
+            -e HOST=0.0.0.0 -e PORT=7891 \
+            wkbdy2api:ci
+      - name: Wait for the gateway to answer
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:7891/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:7891/health >/dev/null
+      - name: Verify state is actually in Postgres
+        run: |
+          # The container's own filesystem is ephemeral, so a row here can only
+          # have come from the database.
+          curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7891/v1/chat/completions \
+            -H 'authorization: Bearer ci-smoke-test-key-0123456' \
+            -H 'content-type: application/json' \
+            -d '{"model":"m","messages":[{"role":"user","content":"hi"}]}' || true
+          sleep 3
+          COUNT=$(docker exec pg psql -U wkb -d wkbdy2api -tAc 'SELECT COUNT(*) FROM request_log')
+          echo "request_log rows: $COUNT"
+          test "$COUNT" -ge 1
+      - name: Verify the panel is reachable
+        run: curl -fsS http://127.0.0.1:7891/admin | grep -q 'API Keys'
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs app || true
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f app pg || true
+          docker network rm wkb-smoke || true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image builds with an account-store key that does not exist, so the
+      # gateway is expected to start with an empty pool and report itself
+      # NOT ready. That is the contract this job verifies: the container must
+      # stay up and answer probes honestly rather than exiting on boot.
+      - name: Build image
+        run: docker build -t wkbdy2api:ci .
+
+      - name: Start container
+        run: |
+          docker run -d --name wkb \
+            -e WKB2API_API_KEY=ci-smoke-test-key \
+            -e WKB2API_ACCOUNT_STORE_KEY_B64="$(head -c 32 /dev/urandom | base64)" \
+            -e WKB2API_ALLOW_EPHEMERAL_STORE=true \
+            -p 7891:7891 \
+            wkbdy2api:ci
+
+      - name: Wait for the process to answer liveness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:7891/health >/dev/null; then
+              echo "liveness OK after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became live; logs follow"
+          docker logs wkb
+          exit 1
+
+      - name: Readiness must report the empty pool honestly
+        run: |
+          code=$(curl -s -o /tmp/ready.json -w '%{http_code}' http://127.0.0.1:7891/ready)
+          cat /tmp/ready.json
+          echo
+          if [ "$code" != "503" ]; then
+            echo "expected 503 from /ready with an empty pool, got $code"
+            docker logs wkb
+            exit 1
+          fi
+
+      - name: Unauthenticated /v1 calls must be rejected
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7891/v1/chat/completions \
+            -H 'content-type: application/json' -d '{"model":"x","messages":[]}')
+          if [ "$code" != "401" ]; then
+            echo "expected 401 without an API key, got $code"
+            docker logs wkb
+            exit 1
+          fi
+
+      - name: Authenticated request must reach the upstream layer
+        run: |
+          # The upstream is unreachable from CI, so a 4xx/5xx that is NOT 401
+          # proves auth passed and the request was proxied onward.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7891/v1/chat/completions \
+            -H 'content-type: application/json' \
+            -H 'authorization: Bearer ci-smoke-test-key' \
+            -d '{"model":"x","messages":[{"role":"user","content":"hi"}]}')
+          echo "authenticated status: $code"
+          if [ "$code" = "401" ]; then
+            echo "valid API key was rejected"
+            docker logs wkb
+            exit 1
+          fi
+
+      - name: Container logs
+        if: always()
+        run: docker logs wkb

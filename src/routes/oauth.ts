@@ -20,7 +20,7 @@ export function oauthRoutes(app: FastifyInstance, opts: { broker: OAuthBroker })
       const origin = new URL(req.headers.origin ?? '');
       if (!['http:', 'https:'].includes(origin.protocol) || origin.host !== req.headers.host || origin.origin !== req.headers.origin) throw new Error();
     } catch {
-      return reply.code(403).send({ error: { code: 'oauth_invalid_origin', message: '请从管理面板发起登录。' } });
+      return reply.code(403).send({ error: { code: 'oauth_invalid_origin', message: 'Start the sign-in from the admin panel.' } });
     }
   });
 
@@ -28,7 +28,7 @@ export function oauthRoutes(app: FastifyInstance, opts: { broker: OAuthBroker })
     const known = err instanceof OAuthError;
     const malformed = !known && (err as { statusCode?: number }).statusCode === 400;
     reply.code(known ? err.statusCode : malformed ? 400 : 500).send({
-      error: { code: known ? err.code : malformed ? 'oauth_invalid_request' : 'oauth_internal_error', message: '登录未完成，请重试或检查网关网络。' },
+      error: { code: known ? err.code : malformed ? 'oauth_invalid_request' : 'oauth_internal_error', message: 'Sign-in did not complete. Retry, or check the gateway network.' },
     });
   });
 

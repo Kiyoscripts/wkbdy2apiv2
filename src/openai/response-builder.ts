@@ -1,4 +1,10 @@
 import type { UpstreamChunk } from '../workbuddy/client.js';
+import {
+  ToolAccumulator,
+  normalizeFinishReason,
+  type AssembledToolCall,
+  type OpenAiToolCallDelta,
+} from './tool-calls.js';
 
 /**
  * Upstream events → OpenAI responses. The upstream is a near-standard
@@ -6,7 +12,7 @@ import type { UpstreamChunk } from '../workbuddy/client.js';
  * owns every conversion:
  *  - finish_reason '' upstream means "in progress" → null (handled in client normalize)
  *  - delta shells (reasoning_content/refusal/function_call/extra_fields) filtered
- *  - tool_calls aggregated across frames for non-stream responses
+ *  - tool_calls accumulated by the shared ToolAccumulator (see tool-calls.ts)
  *  - usage reduced to the three standard fields
  */
 
@@ -16,12 +22,7 @@ export type OpenAiUsage = {
   total_tokens: number;
 };
 
-export type OpenAiToolCallDelta = {
-  index: number;
-  id?: string;
-  type?: 'function';
-  function?: { name?: string; arguments?: string };
-};
+export type { OpenAiToolCallDelta, AssembledToolCall };
 
 /** Streaming: convert one upstream chunk into one OpenAI chunk delta. */
 export function toOpenAiChunk(
@@ -53,7 +54,7 @@ export function toOpenAiChunk(
         index: 0,
         delta: delta ?? {},
         logprobs: null,
-        finish_reason: chunk.finish_reason,
+        finish_reason: normalizeFinishReason(chunk.finish_reason),
       },
     ],
   };
@@ -84,7 +85,20 @@ function deltaFrom(chunk: UpstreamChunk): Record<string, unknown> | null {
   return any ? delta : null;
 }
 
-/** Normalize upstream tool_call frame entries; drop empty shells. */
+/**
+ * Normalize upstream tool_call frame entries into OpenAI streaming deltas.
+ * Empty upstream shell frames are dropped.
+ *
+ * OpenAI streaming semantics: metadata (`id`/`type`/`name`) is emitted once,
+ * while later frames contain only the same `index` and argument fragments.
+ * Never invent a second ID or append a fallback `"{}"` value.
+ *
+ * Frames are stateless within a chunk, which is all the streaming path needs:
+ * the upstream never repeats metadata for an index after its first frame.
+ * Cross-frame state (and therefore the id-changed-mid-stream check) lives in
+ * ToolAccumulator, used by the aggregating path. `tests/tool-calls.test.ts`
+ * asserts both paths agree on the same fixture.
+ */
 function openAiToolCallDeltas(
   raw: UpstreamChunk['delta']['tool_calls'],
 ): OpenAiToolCallDelta[] {
@@ -96,9 +110,6 @@ function openAiToolCallDeltas(
     const args = tc.function?.arguments ?? '';
     if (!tc.id && !name && !args) continue; // upstream shell frame
 
-    // OpenAI streaming semantics: metadata is emitted once, while later
-    // frames contain only the same index and argument deltas. Never invent a
-    // second ID or append a fallback "{}" value.
     if (tc.id) {
       out.push({
         index,
@@ -116,11 +127,14 @@ function openAiToolCallDeltas(
 /**
  * Aggregation state for building a non-stream chat.completion from the
  * (always-streaming) upstream.
+ *
+ * Tool-call accumulation and validation are delegated to ToolAccumulator so
+ * the streaming and non-stream paths cannot drift apart.
  */
 export class CompletionAggregator {
   private content = '';
   private reasoning = '';
-  private toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  private readonly tools = new ToolAccumulator();
   private finishReason: string | null = null;
   private usage: OpenAiUsage | null = null;
   private upstreamId: string | undefined;
@@ -131,15 +145,8 @@ export class CompletionAggregator {
     if (chunk.id && !this.upstreamId) this.upstreamId = chunk.id;
     if (chunk.delta.content) this.content += chunk.delta.content;
     if (chunk.delta.reasoning_content) this.reasoning += chunk.delta.reasoning_content;
-    for (const tc of chunk.delta.tool_calls ?? []) {
-      const idx = typeof tc.index === 'number' ? tc.index : 0;
-      const cur = this.toolCalls.get(idx) ?? { id: '', name: '', args: '' };
-      if (tc.id) cur.id = tc.id;
-      if (tc.function?.name) cur.name += tc.function.name;
-      if (tc.function?.arguments) cur.args += tc.function.arguments;
-      this.toolCalls.set(idx, cur);
-    }
-    if (chunk.finish_reason) this.finishReason = chunk.finish_reason;
+    this.tools.push(chunk);
+    if (chunk.finish_reason) this.finishReason = normalizeFinishReason(chunk.finish_reason);
     if (chunk.usage) {
       this.usage = {
         prompt_tokens: chunk.usage.prompt_tokens ?? 0,
@@ -167,14 +174,8 @@ export class CompletionAggregator {
     }
     const message: Record<string, unknown> = { role: 'assistant', content: this.content || null };
     if (this.reasoning) message.reasoning_content = this.reasoning;
-    const toolCalls = [...this.toolCalls.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([index, tc]) => ({
-        id: tc.id || `call_${index}`,
-        type: 'function',
-        function: { name: tc.name, arguments: tc.args },
-        index,
-      }));
+    // Throws UpstreamProtocolError on incomplete or non-JSON tool arguments.
+    const toolCalls = this.tools.assembled();
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
     const finish = this.finishReason ?? (toolCalls.length > 0 ? 'tool_calls' : 'stop');
     const out = {

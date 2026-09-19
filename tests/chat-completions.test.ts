@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll } from 'vitest';
 import { buildApp } from '../src/app.js';
+import { registryWith } from './helpers/api-key-registry.js';
 import type { FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +75,7 @@ function build(
 ): FastifyInstance {
   return buildApp({
     apiKey: KEY,
+    apiKeys: registryWith(KEY),
     models: buildCatalog(parseProductConfig(live)),
     client,
     pool: new CredentialPool(),

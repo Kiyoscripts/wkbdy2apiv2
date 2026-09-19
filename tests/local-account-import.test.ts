@@ -106,7 +106,7 @@ describe('local WorkBuddy account import', () => {
 
     expect(result.credentials).toEqual([]);
     expect(result.issues).toEqual([
-      { code: 'expired', message: '账号令牌已过期或缺少有效期。' },
+      { code: 'expired', message: 'The account token is expired or has no expiry.' },
     ]);
   });
 
@@ -120,7 +120,7 @@ describe('local WorkBuddy account import', () => {
 
     expect(result.credentials).toEqual([]);
     expect(result.issues).toEqual([
-      { code: 'identity_mismatch', message: '账号身份与令牌不匹配。' },
+      { code: 'identity_mismatch', message: 'The account identity does not match the token.' },
     ]);
   });
 
@@ -130,7 +130,7 @@ describe('local WorkBuddy account import', () => {
     await expect(readLocalWorkBuddyAccounts(missing, now)).rejects.toMatchObject({
       name: 'LocalImportError',
       code: 'file_not_found',
-      message: '未找到本机 WorkBuddy 凭据文件。',
+      message: 'Local WorkBuddy credential file not found.',
     } satisfies Partial<LocalImportError>);
   });
 
@@ -140,7 +140,7 @@ describe('local WorkBuddy account import', () => {
     await expect(readLocalWorkBuddyAccounts(path, now)).rejects.toMatchObject({
       name: 'LocalImportError',
       code: 'format_error',
-      message: 'WorkBuddy 凭据文件不是有效 JSON。',
+      message: 'The WorkBuddy credential file is not valid JSON.',
     } satisfies Partial<LocalImportError>);
   });
 });

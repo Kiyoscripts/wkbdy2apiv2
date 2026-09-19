@@ -19,7 +19,7 @@ async function panel(popupBlocked = false) {
     let body: unknown;
     if (path.endsWith('/oauth/start')) body = { id: 'test-transaction', authorization_url: 'https://www.workbuddy.ai/login?state=secret-in-memory', status: 'pending' };
     else if (path.endsWith('/status')) { completed = true; body = { id: 'test-transaction', status: 'completed', account_label: '#1' }; }
-    else if (path.endsWith('/overview')) body = { ...overview, pool: completed ? { size: 1, strategy: 'round-robin', accounts: [{ label: '#1', note: 'Account', ok: true, detail: '网页登录' }] } : overview.pool };
+    else if (path.endsWith('/overview')) body = { ...overview, pool: completed ? { size: 1, strategy: 'round-robin', accounts: [{ label: '#1', note: 'Account', ok: true, detail: 'Web login' }] } : overview.pool };
     else throw new Error('unexpected local request');
     return { ok: true, status: 200, json: async () => body } as Response;
   });
@@ -33,7 +33,7 @@ async function panel(popupBlocked = false) {
   const input = w.document.querySelector('#key-input') as unknown as HTMLInputElement;
   input.value = 'test-only-admin-key';
   (w.document.querySelector('#key-submit') as unknown as HTMLButtonElement).click();
-  await vi.waitFor(() => expect(w.document.querySelector('#main h2')?.textContent).toBe('概览'));
+  await vi.waitFor(() => expect(w.document.querySelector('#main h2')?.textContent).toBe('Overview'));
   (w.document.querySelector('[data-view="upstream"]') as unknown as HTMLButtonElement).click();
   return { w, fetchFn, popup };
 }
@@ -46,7 +46,7 @@ describe('embedded OAuth panel interactions', () => {
     note.value = 'keep my note'; note.focus();
     (w.document.querySelector('#oauth-start') as unknown as HTMLButtonElement).click();
     await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith('https://www.workbuddy.ai/login?state=secret-in-memory'));
-    await vi.waitFor(() => expect(w.document.querySelector('#oauth-status')?.textContent).toContain('登录成功'), { timeout: 3000 });
+    await vi.waitFor(() => expect(w.document.querySelector('#oauth-status')?.textContent).toContain('Signed in'), { timeout: 3000 });
     await vi.waitFor(() => expect(w.document.querySelector('#acct-rows')?.textContent).toContain('#1'));
     expect(w.document.querySelector('#main .section')).toBe(section);
     expect(w.document.querySelector('#oauth-note')).toBe(note);
@@ -61,6 +61,6 @@ describe('embedded OAuth panel interactions', () => {
     (w.document.querySelector('#oauth-start') as unknown as HTMLButtonElement).click();
     await vi.waitFor(() => expect(w.document.querySelector('#oauth-link')?.hasAttribute('hidden')).toBe(false));
     expect(w.document.querySelector('#oauth-link')?.getAttribute('rel')).toBe('noopener noreferrer');
-    expect(w.document.querySelector('#oauth-status')?.textContent).toContain('下方链接');
+    expect(w.document.querySelector('#oauth-status')?.textContent).toContain('link below');
   });
 });

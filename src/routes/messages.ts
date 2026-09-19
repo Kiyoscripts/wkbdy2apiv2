@@ -6,12 +6,19 @@ import { anthropicError, mapMessagesError } from '../anthropic/errors.js';
 import { UpstreamProtocolError, type WorkBuddyClient, type StreamResult } from '../workbuddy/client.js';
 import type { ExposedModel } from '../workbuddy/model-catalog.js';
 import type { MetricsCollector } from '../observability/metrics.js';
+import { extractApiKey, keyFingerprint } from '../security/downstream-auth.js';
+import { createRecorder } from './request-context.js';
+import type { CredentialPool } from '../workbuddy/credential-pool.js';
 
 type MessagesOptions = {
   models: ExposedModel[];
   client: WorkBuddyClient;
   metrics: MetricsCollector;
   modelAliases?: Record<string, string>;
+  /** Credential source, used to attribute usage and failures to an account. */
+  pool?: CredentialPool;
+  /** Usage sink, used to charge per-key token quotas after a response completes. */
+  onUsage?: (usage: { keyId?: string; account?: string; model?: string; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }) => void;
 };
 
 export function messagesRoutes(app: FastifyInstance, opts: MessagesOptions): void {
@@ -23,15 +30,41 @@ export function messagesRoutes(app: FastifyInstance, opts: MessagesOptions): voi
     const began = performance.now();
     let model: string | undefined;
     let streaming = false;
-    let counted = false;
     let builder: MessagesResponseBuilder | undefined;
+    let usageCharged = false;
+    const recorder = createRecorder({
+      req,
+      path: '/v1/messages',
+      metrics: opts.metrics,
+      startedAt: began,
+      keyId: keyFingerprint(extractApiKey(req.headers).value),
+      describe: () => ({
+        ...(model !== undefined ? { model } : {}),
+        stream: streaming,
+        ...(opts.pool?.describe() !== undefined ? { account: opts.pool.describe() } : {}),
+      }),
+    });
     const record = (status: number) => {
-      if (counted) return;
-      counted = true;
-      opts.metrics.record({ method: 'POST', path: '/v1/messages', model, stream: streaming,
-        status, duration_ms: Math.round(performance.now() - began),
-        prompt_tokens: builder?.usage?.input_tokens, completion_tokens: builder?.usage?.output_tokens,
-        ...(status >= 400 ? { error_code: 'messages_request_failed' } : {}),
+      recorder.finish({
+        status,
+        prompt_tokens: builder?.usage?.input_tokens,
+        completion_tokens: builder?.usage?.output_tokens,
+        ...(status >= 400 ? { error_code: 'messages_request_failed', error_class: 'messages_failure' } : {}),
+      });
+    };
+    /** Charge the per-key quota once, when usage becomes available. */
+    const chargeUsage = () => {
+      if (usageCharged || !builder?.usage) return;
+      usageCharged = true;
+      opts.onUsage?.({
+        keyId: keyFingerprint(extractApiKey(req.headers).value),
+        account: opts.pool?.describe(),
+        model,
+        usage: {
+          prompt_tokens: builder.usage.input_tokens,
+          completion_tokens: builder.usage.output_tokens,
+          total_tokens: builder.usage.input_tokens + builder.usage.output_tokens,
+        },
       });
     };
     const fail = (status: number, message: string) => {
@@ -77,11 +110,12 @@ export function messagesRoutes(app: FastifyInstance, opts: MessagesOptions): voi
       }
     };
     try {
-      stream = await opts.client.streamChatCompletion(upstream, abort.signal, true, true);
+      stream = await opts.client.streamChatCompletion(upstream, abort.signal, true, true, recorder.attempts);
       if (!streaming) {
         for await (const chunk of stream) builder.push(chunk);
         builder.finish();
         const message = builder.build();
+        chargeUsage();
         record(200);
         return message;
       }
@@ -98,6 +132,7 @@ export function messagesRoutes(app: FastifyInstance, opts: MessagesOptions): voi
       for (const event of initial) await writeEvent(event);
       for await (const chunk of stream) for (const event of builder.push(chunk)) await writeEvent(event);
       for (const event of builder.finish()) await writeEvent(event);
+      chargeUsage();
       record(200);
       reply.raw.end();
     } catch (err) {

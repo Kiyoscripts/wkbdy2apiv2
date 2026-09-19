@@ -1,0 +1,53 @@
+# Render blueprint.
+#
+# The gateway keeps two things across deploys: the encrypted account blob and
+# the request history. Render's filesystem is ephemeral, so both live in a
+# managed Postgres instead of on disk, and the encryption key comes from an
+# environment variable rather than a mounted file — nothing here needs a
+# persistent disk.
+#
+# Before the first deploy, set these in the Render dashboard (both are marked
+# sync:false, so they are never committed):
+#
+#   WKB2API_API_KEY              the gateway's own API key (>= 16 chars)
+#   WKB2API_ACCOUNT_STORE_KEY_B64   openssl rand -base64 32
+#
+# DATABASE_URL comes from the managed database and is wired in automatically.
+
+services:
+  - type: web
+    name: wkbdy2api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: WKB2API_API_KEY
+        sync: false
+      - key: WKB2API_ACCOUNT_STORE_KEY_B64
+        sync: false
+      # Persist accounts and telemetry in the database rather than on the
+      # container's ephemeral disk, where both would be discarded on every
+      # deploy or restart.
+      - key: WKB2API_STORAGE_BACKEND
+        value: postgres
+      - key: WKB2API_DATABASE_URL
+        fromDatabase:
+          name: wkbdy2api-db
+          property: connectionString
+      - key: WKB2API_DATABASE_SSL
+        value: "true"
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      # Change this from the default before exposing the panel.
+      - key: WKB2API_BOOTSTRAP_ADMIN_KEY
+        sync: false
+
+databases:
+  - name: wkbdy2api-db
+    plan: basic-256mb
+    databaseName: wkbdy2api
+    user: wkb

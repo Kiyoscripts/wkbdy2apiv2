@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { registryWith } from './helpers/api-key-registry.js';
 import { CredentialPool } from '../src/workbuddy/credential-pool.js';
 import { WorkBuddyClient } from '../src/workbuddy/client.js';
 import { createMetrics } from '../src/observability/metrics.js';
@@ -13,7 +14,7 @@ function setup() {
   const pool = new CredentialPool();
   const fetchFn = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: { authUrl: 'https://www.workbuddy.ai/login?state=official-secret', state: 'official-secret' } })));
   const client = new WorkBuddyClient({ credentials: pool, userAgent: 'WorkBuddy/2.137.1', upstreamUrl: 'https://www.workbuddy.ai/v2/chat/completions', fetchFn: async () => { throw new Error('no chat allowed'); } });
-  const app = buildApp({ apiKey: KEY, pool, client, models: [], metrics: createMetrics(), upstreamUrl: 'https://www.workbuddy.ai/v2/chat/completions', upstreamUa: 'WorkBuddy/2.137.1', version: 'test', startedAt: Date.now(), oauthOptions: { fetchFn, pollIntervalMs: 60_000 } });
+  const app = buildApp({ apiKey: KEY, apiKeys: registryWith(KEY), pool, client, models: [], metrics: createMetrics(), upstreamUrl: 'https://www.workbuddy.ai/v2/chat/completions', upstreamUa: 'WorkBuddy/2.137.1', version: 'test', startedAt: Date.now(), oauthOptions: { fetchFn, pollIntervalMs: 60_000 } });
   apps.push(app);
   const headers = { authorization: `Bearer ${KEY}`, origin: 'https://gateway.example', host: 'gateway.example' };
   return { app, headers, fetchFn };

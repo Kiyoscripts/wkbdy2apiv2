@@ -12,13 +12,43 @@ services:
       PORT: 7891
       WKB2API_ACCOUNT_STORE_PATH: /app/data/accounts.enc
       WKB2API_ACCOUNT_STORE_KEY_FILE: /run/secrets/account-store-key
+      # Persist account state and telemetry in Postgres instead of the
+      # container filesystem. Comment this out (or set to `file`) to fall back
+      # to the encrypted blob + JSONL described below.
+      WKB2API_STORAGE_BACKEND: ${WKB2API_STORAGE_BACKEND:-postgres}
+      WKB2API_DATABASE_URL: ${WKB2API_DATABASE_URL:-postgres://wkb:wkb@db:5432/wkbdy2api}
     volumes:
+      # Mounted even in postgres mode: it holds the account-store key file when
+      # one is used, and keeps the JSONL backend working unchanged.
       - wkbdy2api-data:/app/data
     secrets:
       - account-store-key
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Bundled database for local and single-host deployments. Managed Postgres
+  # (Render, RDS, Neon, …) is the better choice in production; point
+  # WKB2API_DATABASE_URL at it and remove this service.
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wkb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wkb}
+      POSTGRES_DB: ${POSTGRES_DB:-wkbdy2api}
+    volumes:
+      - wkbdy2api-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wkb} -d ${POSTGRES_DB:-wkbdy2api}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Not published: the gateway is the only intended client.
 
 volumes:
   wkbdy2api-data:
+  wkbdy2api-postgres:
 
 secrets:
   account-store-key:

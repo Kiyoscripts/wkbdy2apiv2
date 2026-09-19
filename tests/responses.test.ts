@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
+import { registryWith } from './helpers/api-key-registry.js';
 import { createMetrics } from '../src/observability/metrics.js';
 import { CredentialPool } from '../src/workbuddy/credential-pool.js';
 import { WorkBuddyClient } from '../src/workbuddy/client.js';
@@ -73,6 +74,7 @@ function responseClient(status: number, body: unknown): WorkBuddyClient {
 function build(client: WorkBuddyClient): FastifyInstance {
   return buildApp({
     apiKey: KEY,
+    apiKeys: registryWith(KEY),
     models: buildCatalog(parseProductConfig(live)),
     client,
     pool: new CredentialPool(),

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 /**
  * Downstream API key check. Constant-time comparison; the key never appears
@@ -10,6 +10,19 @@ export function isApiKeyValid(provided: string | undefined, expected: string): b
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * A stable, non-reversible fingerprint of a downstream API key.
+ *
+ * Per-key quotas and per-key usage reporting both need to tell callers apart,
+ * but the key itself must never reach metrics, the admin panel, or disk. A
+ * salted-free SHA-256 truncated to 16 hex characters is enough to distinguish
+ * keys while remaining useless to anyone who reads the log.
+ */
+export function keyFingerprint(key: string | undefined): string | undefined {
+  if (!key) return undefined;
+  return 'key_' + createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
 export type ApiKeyHeaders = {

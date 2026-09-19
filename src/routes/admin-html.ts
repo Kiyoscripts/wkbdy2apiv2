@@ -9,7 +9,7 @@
 
 export function adminPanelHtml(): string {
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -419,6 +419,28 @@ td .muted { color: var(--text-tertiary); }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
 }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ---- API keys ---- */
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); margin: 10px 0; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+.badge {
+  display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 1px 6px; border-radius: 4px;
+  background: var(--row-hover); color: var(--text-tertiary); vertical-align: middle;
+}
+.badge-admin { background: var(--accent); color: #fff; }
+.secret-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.secret-row code {
+  flex: 1; min-width: 220px; padding: 8px 10px; border-radius: 6px;
+  background: var(--row-hover); font-size: 13px; word-break: break-all;
+  font-variant-numeric: tabular-nums; user-select: all;
+}
+.btn-danger { color: var(--error); border-color: var(--error); }
+.btn-danger:hover { background: var(--error); color: #fff; }
+.btn[disabled] { opacity: 0.5; cursor: default; }
+.btn-ghost { background: transparent; }
+.row-new { background: var(--accent-soft, var(--row-hover)); }
+.form-error { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 16px; }
 </style>
 </head>
 <body>
@@ -442,6 +464,8 @@ td .muted { color: var(--text-tertiary); }
     oauthMessage: '',
     oauthUrl: '',
     overviewPending: false,
+    keys: null,
+    newKey: null,
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -452,10 +476,17 @@ td .muted { color: var(--text-tertiary); }
     models: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2.2" y="2.7" width="11.6" height="4" rx="1.2"/><rect x="2.2" y="9.3" width="11.6" height="4" rx="1.2"/><path d="M4.4 4.7h.01M4.4 11.3h.01"/></svg>',
     requests: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h7"/></svg>',
     upstream: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 6.4a5.2 5.2 0 1 0-1.6 5.1"/><path d="M13.4 2.9v3.6h-3.6"/></svg>',
+    keys: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="9.4" r="3.1"/><path d="M8.2 7.2 13 2.4M11.4 4.2l1.5 1.5"/></svg>',
   };
 
   function navLabel(v) {
-    return { overview: '概览', models: '模型', requests: '请求记录', upstream: '上游与凭据' }[v];
+    return {
+      overview: 'Overview',
+      models: 'Models',
+      requests: 'Requests',
+      upstream: 'Upstream & Credentials',
+      keys: 'API Keys',
+    }[v];
   }
 
   // ---------- data ----------
@@ -468,7 +499,7 @@ td .muted { color: var(--text-tertiary); }
           try { localStorage.removeItem(KEY_STORAGE); } catch (e) {}
           state.key = null;
           state.overview = null;
-          state.unlockError = 'Key 无效，请检查后重试。';
+          state.unlockError = 'Invalid key. Check it and try again.';
           clearTimeout(state.oauthTimer);
           state.oauth = null;
           state.oauthUrl = '';
@@ -476,7 +507,7 @@ td .muted { color: var(--text-tertiary); }
           render();
         }
         if (!res.ok) {
-          var error = new Error(body.error && body.error.message || '请求失败（HTTP ' + res.status + '）');
+          var error = new Error(body.error && body.error.message || 'Request failed (HTTP ' + res.status + ')');
           error.code = body.error && body.error.code;
           throw error;
         }
@@ -522,7 +553,7 @@ td .muted { color: var(--text-tertiary); }
       var fill = row.querySelector('.bar-fill');
       var val = row.querySelector('.row-value');
       if (fill) fill.style.width = (max ? Math.round(m.count / max * 100) : 0) + '%';
-      if (val) val.textContent = fmtInt(m.count) + ' 次 · ' + fmtInt(m.tokens) + ' tok';
+      if (val) val.textContent = fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok';
     });
   }
 
@@ -539,11 +570,11 @@ td .muted { color: var(--text-tertiary); }
   function fmtUptime(ms) {
     var s = Math.floor(ms / 1000);
     var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h > 0 ? h + ' 小时 ' + m + ' 分' : m + ' 分 ' + (s % 60) + ' 秒';
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (s % 60) + 's';
   }
   function fmtTime(ts) {
     var d = new Date(ts);
-    return d.toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    return d.toLocaleTimeString(undefined, { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -562,11 +593,11 @@ td .muted { color: var(--text-tertiary); }
 
   function unlockView() {
     return '<div class="unlock">' +
-      '<h2>Wkbdy2api 控制台</h2>' +
-      '<p>输入网关的本地 API Key（与调用 /v1 接口使用的 Bearer Key 相同）。Key 只保存在此浏览器。</p>' +
+      '<h2>Wkbdy2api Console</h2>' +
+      '<p>Enter the gateway API key — the same Bearer key used for the /v1 endpoints. It is stored in this browser only.</p>' +
       '<input class="key-input" id="key-input" type="password" placeholder="wkb2api-local-key…" autocomplete="off">' +
       '<div class="key-error" id="key-error">' + (state.unlockError || '') + '</div>' +
-      '<button class="btn" id="key-submit" style="width:100%">解锁</button>' +
+      '<button class="btn" id="key-submit" style="width:100%">Unlock</button>' +
       '</div>';
   }
 
@@ -574,13 +605,13 @@ td .muted { color: var(--text-tertiary); }
     var input = $('#key-input'), btn = $('#key-submit'), err = $('#key-error');
     function submit() {
       var v = input.value.trim();
-      if (!v) { err.textContent = '请输入 Key。'; return; }
+      if (!v) { err.textContent = 'Enter the key.'; return; }
       if (btn.disabled) return;
       state.key = v;
       state.overview = null;
       state.unlockError = null;
       btn.disabled = true;
-      btn.textContent = '正在验证…';
+      btn.textContent = 'Verifying…';
       refreshOverview().then(function () {
         try { localStorage.setItem(KEY_STORAGE, v); } catch (e) {}
         render();
@@ -588,7 +619,7 @@ td .muted { color: var(--text-tertiary); }
       }).catch(function () {
         state.key = null;
         state.overview = null;
-        state.unlockError = state.unlockError || '无法连接网关，请重试。';
+        state.unlockError = state.unlockError || 'Could not reach the gateway. Try again.';
         render();
       });
     }
@@ -598,15 +629,15 @@ td .muted { color: var(--text-tertiary); }
   }
 
   function shellView() {
-    var items = ['overview', 'models', 'requests', 'upstream'].map(function (v) {
+    var items = ['overview', 'models', 'requests', 'upstream', 'keys'].map(function (v) {
       return '<button class="nav-item" data-view="' + v + '"' +
         (state.view === v ? ' aria-current="true"' : '') + '>' + icons[v] + '<span>' + navLabel(v) + '</span></button>';
     }).join('');
     return '<div class="shell">' +
       '<aside class="sidebar">' +
-      '<div class="brand"><span class="brand-dot" id="health-dot"></span><div><h1>Wkbdy2api</h1><small>WorkBuddy → OpenAI 网关</small></div></div>' +
+      '<div class="brand"><span class="brand-dot" id="health-dot"></span><div><h1>Wkbdy2api</h1><small>WorkBuddy → OpenAI gateway</small></div></div>' +
       '<nav class="nav">' + items + '</nav>' +
-      '<div class="sidebar-footer">v' + escapeHtml(state.overview ? state.overview.version : '') + ' · 本地运行</div>' +
+      '<div class="sidebar-footer">v' + escapeHtml(state.overview ? state.overview.version : '') + ' · local</div>' +
       '</aside><main class="main" id="main"></main></div>';
   }
 
@@ -620,6 +651,7 @@ td .muted { color: var(--text-tertiary); }
     if (state.view === 'overview') main.innerHTML = viewOverview(d);
     else if (state.view === 'models') main.innerHTML = viewModels(d);
     else if (state.view === 'requests') { main.innerHTML = viewRequestsShell(); loadRequests(); }
+    else if (state.view === 'keys') { main.innerHTML = viewKeysShell(); loadKeys(); }
     else if (state.view === 'upstream') {
       main.innerHTML = viewUpstream(d);
       wireLoginForm();
@@ -637,23 +669,23 @@ td .muted { color: var(--text-tertiary); }
     var maxCount = 0;
     s.per_model.forEach(function (m) { if (m.count > maxCount) maxCount = m.count; });
     var modelRows = s.per_model.length === 0
-      ? '<div class="row"><div class="row-main"><div class="row-title muted" style="color:var(--text-tertiary)">尚无请求</div></div></div>'
+      ? '<div class="row"><div class="row-main"><div class="row-title muted" style="color:var(--text-tertiary)">No requests yet</div></div></div>'
       : s.per_model.map(function (m) {
         return '<div class="row" data-mkey="' + escapeHtml(m.model) + '">' +
           '<div class="row-main"><div class="row-title">' + escapeHtml(m.model) + '</div>' +
           '<div class="bar-track"><div class="bar-fill" style="width:' + (maxCount ? Math.round(m.count / maxCount * 100) : 0) + '%"></div></div></div>' +
-          '<div class="row-value">' + fmtInt(m.count) + ' 次 · ' + fmtInt(m.tokens) + ' tok</div></div>';
+          '<div class="row-value">' + fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok</div></div>';
       }).join('');
 
-    return '<section class="section"><h2>概览</h2>' +
-      '<p class="page-sub">网关运行 ' + fmtUptime(s.uptime_ms) + '，数据每 5 秒自动刷新。</p>' +
+    return '<section class="section"><h2>Overview</h2>' +
+      '<p class="page-sub">Gateway up ' + fmtUptime(s.uptime_ms) + '. Data refreshes every 5 seconds.</p>' +
       '<div class="stat-grid">' +
-      statTile('总请求', fmtInt(s.total_requests), '', 'stat-total') +
-      statTile('错误率', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok', 'stat-errors') +
-      statTile('P95 延迟', fmtMs(s.p95_ms), '', 'stat-p95') +
-      statTile('Token 用量', fmtInt(s.tokens.prompt + s.tokens.completion), '', 'stat-tokens') +
+      statTile('Total requests', fmtInt(s.total_requests), '', 'stat-total') +
+      statTile('Error rate', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok', 'stat-errors') +
+      statTile('P95 latency', fmtMs(s.p95_ms), '', 'stat-p95') +
+      statTile('Token usage', fmtInt(s.tokens.prompt + s.tokens.completion), '', 'stat-tokens') +
       '</div>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">模型调用量</h3><span class="card-note">累计请求 · 最近 200 条窗口</span></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Calls by model</h3><span class="card-note">cumulative · last 200 window</span></div>' +
       '<div class="rows">' + modelRows + '</div></div>' +
       '</section>';
   }
@@ -662,7 +694,7 @@ td .muted { color: var(--text-tertiary); }
     var rows = d.models.map(function (m) {
       var x = m.x_workbuddy || {};
       var tags = [];
-      if (x.is_default) tags.push('<span class="pill neutral">默认</span>');
+      if (x.is_default) tags.push('<span class="pill neutral">default</span>');
       if (x.supports_tool_call) tags.push('tool');
       if (x.supports_images) tags.push('vision');
       var maxIn = x.max_input_tokens ? (x.max_input_tokens >= 1000000 ? (x.max_input_tokens / 1000000) + 'M' : Math.round(x.max_input_tokens / 1000) + 'K') : '—';
@@ -670,18 +702,157 @@ td .muted { color: var(--text-tertiary); }
       return '<div class="row">' +
         '<div class="row-main"><div class="row-title" style="font-family:ui-monospace,Consolas,monospace;font-size:12px">' + escapeHtml(m.id) + '</div>' +
         '<div class="row-sub">' + escapeHtml(x.name || '') + (tags.length ? ' · ' + tags.join(' · ') : '') + '</div></div>' +
-        '<div class="row-value">入 ' + maxIn + ' / 出 ' + maxOut + '</div>' +
+        '<div class="row-value">in ' + maxIn + ' / out ' + maxOut + '</div>' +
         '<span class="pill ' + (x.credits === 'x0.00' ? 'ok' : 'neutral') + '">' + escapeHtml(x.credits || '') + '</span></div>';
     }).join('');
-    return '<section class="section"><h2>模型</h2>' +
-      '<p class="page-sub">' + d.models.length + ' 个可用模型，由 CLI agent 白名单与配置交集生成。</p>' +
+    return '<section class="section"><h2>Models</h2>' +
+      '<p class="page-sub">' + d.models.length + ' available models, intersected from the CLI agent allow-list and the product config.</p>' +
       '<div class="card"><div class="rows">' + rows + '</div></div></section>';
   }
 
-  function viewRequestsShell() {
-    return '<section class="section"><h2>请求记录</h2>' +
-      '<p class="page-sub">最近 ' + 200 + ' 条请求（重启后清零）。</p>' +
-      '<div class="card log-scroll" id="req-card"><div id="req-body" class="muted" style="color:var(--text-tertiary);padding:16px 18px;font-size:13px">加载中…</div></div></section>';
+  // ---------- API keys ----------
+  //
+  // Keys are shown as hash-backed records: the panel never has the plaintext,
+  // because the gateway only ever stored a hash. Creation therefore has to show
+  // the value once, prominently, with a copy button — after that the only
+  // recovery is to revoke and reissue.
+
+  function viewKeysShell() {
+    return '<section class="section"><h2>API Keys</h2>' +
+      '<p class="page-sub">Keys authenticate <code>/v1</code> requests and the panel. Only a hash is stored, so a lost key cannot be recovered — revoke it and issue a new one.</p>' +
+      '<div id="key-banner"></div>' +
+      '<div class="card" style="padding:16px 18px;margin-bottom:16px">' +
+      '<div class="form-row"><label for="key-name">Name</label>' +
+      '<input class="input" id="key-name" type="text" placeholder="e.g. laptop, ci, teammate-name" autocomplete="off"></div>' +
+      '<div class="form-row"><label for="key-note">Note (optional)</label>' +
+      '<input class="input" id="key-note" type="text" placeholder="what this key is for" autocomplete="off"></div>' +
+      '<label class="check"><input type="checkbox" id="key-admin"> <span>Admin key — may manage the gateway (accounts, keys, settings)</span></label>' +
+      '<div class="actions"><button class="btn" id="key-create">Create key</button></div>' +
+      '<div id="key-error" class="form-error"></div>' +
+      '</div>' +
+      '<div class="card" id="key-card"><div id="key-body" class="muted" style="color:var(--text-tertiary);padding:16px 18px;font-size:13px">Loading…</div></div>' +
+      '</section>';
+  }
+
+  function loadKeys() {
+    var create = $('#key-create');
+    if (create) create.addEventListener('click', createKey);
+    var name = $('#key-name');
+    if (name) name.addEventListener('keydown', function (e) { if (e.key === 'Enter') createKey(); });
+    return api('keys').then(function (d) {
+      state.keys = d;
+      renderKeyBanner();
+      renderKeyTable();
+    }).catch(function () {});
+  }
+
+  /** The one-time reveal, shown above the table after a successful create. */
+  function renderKeyBanner() {
+    var host = $('#key-banner');
+    if (!host) return;
+    if (!state.newKey) { host.innerHTML = ''; return; }
+    host.innerHTML = '<div class="card" style="padding:16px 18px;margin-bottom:16px;border-color:var(--accent)">' +
+      '<div style="font-weight:600;margin-bottom:6px">Key created — copy it now</div>' +
+      '<p class="page-sub" style="margin:0 0 10px">' + escapeHtml(state.newKey.warning) + '</p>' +
+      '<div class="secret-row"><code id="new-key-value">' + escapeHtml(state.newKey.key) + '</code>' +
+      '<button class="btn" id="key-copy">Copy</button>' +
+      '<button class="btn btn-ghost" id="key-dismiss">Dismiss</button></div>' +
+      '</div>';
+    var copy = $('#key-copy');
+    if (copy) copy.addEventListener('click', function () {
+      var value = state.newKey ? state.newKey.key : '';
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(value).then(function () {
+          copy.textContent = 'Copied';
+          setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
+        }).catch(function () {});
+      }
+    });
+    var dismiss = $('#key-dismiss');
+    if (dismiss) dismiss.addEventListener('click', function () { state.newKey = null; renderKeyBanner(); });
+  }
+
+  function renderKeyTable() {
+    var body = $('#key-body');
+    if (!body || !state.keys) return;
+    var rows = state.keys.keys.map(function (k) {
+      var badge = k.admin
+        ? '<span class="badge badge-admin">admin</span>'
+        : '<span class="badge">api</span>';
+      var used = k.last_used_at ? fmtTime(k.last_used_at) : '<span class="muted">never</span>';
+      return '<tr' + (k.id === state.keys.just_created ? ' class="row-new"' : '') + '>' +
+        '<td>' + escapeHtml(k.name) + ' ' + badge + (k.note ? '<div class="muted" style="font-size:12px">' + escapeHtml(k.note) + '</div>' : '') + '</td>' +
+        '<td><code class="muted">' + escapeHtml(k.prefix) + '…</code></td>' +
+        '<td>' + k.request_count + '</td>' +
+        '<td>' + used + '</td>' +
+        '<td>' + fmtTime(k.created_at) + '</td>' +
+        '<td><button class="btn btn-ghost btn-danger" data-revoke="' + escapeHtml(k.id) + '" data-name="' + escapeHtml(k.name) + '">Revoke</button></td>' +
+        '</tr>';
+    }).join('');
+
+    var bootstrap = '<tr><td>' + escapeHtml(state.keys.bootstrap_key.name) + ' <span class="badge badge-admin">admin</span>' +
+      '<div class="muted" style="font-size:12px">' + escapeHtml(state.keys.bootstrap_key.note) + '</div></td>' +
+      '<td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td>' +
+      '<td><span class="muted">from env</span></td>' +
+      '<td><span class="muted">not revocable</span></td></tr>';
+
+    var table = rows.length
+      ? '<table><thead><tr><th>Name</th><th>Prefix</th><th>Requests</th><th>Last used</th><th>Created</th><th></th></tr></thead><tbody>' + rows + bootstrap + '</tbody></table>'
+      : '<table><thead><tr><th>Name</th><th>Prefix</th><th>Requests</th><th>Last used</th><th>Created</th><th></th></tr></thead><tbody>' + bootstrap + '</tbody></table>';
+
+    $('#key-card').innerHTML = table;
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-revoke]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-revoke');
+        var name = btn.getAttribute('data-name');
+        // Revocation is immediate and irreversible, so it asks first and names
+        // the key rather than acting on a row the operator may have misread.
+        if (!window.confirm('Revoke "' + name + '"? Any client using it will start receiving 401s immediately. This cannot be undone.')) return;
+        btn.disabled = true;
+        api('keys/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () {
+          return loadKeys();
+        }).catch(function (err) {
+          btn.disabled = false;
+          var host = $('#key-error');
+          if (host) host.textContent = err.message || 'Could not revoke the key.';
+        });
+      });
+    });
+  }
+
+  function createKey() {
+    var nameEl = $('#key-name');
+    var noteEl = $('#key-note');
+    var adminEl = $('#key-admin');
+    var errorEl = $('#key-error');
+    if (errorEl) errorEl.textContent = '';
+    var name = nameEl ? nameEl.value.trim() : '';
+    if (!name) {
+      if (errorEl) errorEl.textContent = 'Give the key a name so you can tell it apart later.';
+      return;
+    }
+    var payload = { name: name, admin: !!(adminEl && adminEl.checked) };
+    var note = noteEl ? noteEl.value.trim() : '';
+    if (note) payload.note = note;
+
+    api('keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+      .then(function (created) {
+        state.newKey = created;
+        state.keys && (state.keys.just_created = created.id);
+        if (nameEl) nameEl.value = '';
+        if (noteEl) noteEl.value = '';
+        if (adminEl) adminEl.checked = false;
+        return loadKeys();
+      })
+      .catch(function (err) {
+        if (errorEl) errorEl.textContent = err.message || 'Could not create the key.';
+      });
+  }
+
+  function viewRequestsShell() {    return '<section class="section"><h2>Requests</h2>' +
+      '<p class="page-sub">Last ' + 200 + ' requests (cleared on restart).</p>' +
+      '<div class="card log-scroll" id="req-card"><div id="req-body" class="muted" style="color:var(--text-tertiary);padding:16px 18px;font-size:13px">Loading…</div></div></section>';
   }
 
   function loadRequests() {
@@ -689,7 +860,7 @@ td .muted { color: var(--text-tertiary); }
       var body = $('#req-body');
       if (!body) return;
       if (!d.recent || d.recent.length === 0) {
-        body.innerHTML = '尚无请求记录。';
+        body.innerHTML = 'No requests recorded yet.';
         return;
       }
       var trs = d.recent.map(function (r) {
@@ -702,7 +873,7 @@ td .muted { color: var(--text-tertiary); }
           (r.model ? ' <span class="muted">· ' + escapeHtml(r.model) + (r.stream ? ' · stream' : '') + '</span>' : '') + '</td>' +
           '<td>' + st + '</td><td>' + tok + '</td><td>' + fmtMs(r.duration_ms) + '</td></tr>';
       }).join('');
-      $('#req-card').innerHTML = '<table><thead><tr><th>时间</th><th>请求</th><th>状态</th><th>tok 入/出</th><th>耗时</th></tr></thead><tbody>' + trs + '</tbody></table>';
+      $('#req-card').innerHTML = '<table><thead><tr><th>Time</th><th>Request</th><th>Status</th><th>tok in/out</th><th>Duration</th></tr></thead><tbody>' + trs + '</tbody></table>';
     }).catch(function () {});
   }
 
@@ -710,52 +881,78 @@ td .muted { color: var(--text-tertiary); }
     var c = d.credential;
     var u = d.upstream;
     var pool = d.pool || { size: 0, strategy: 'round-robin', accounts: [] };
-    var stratName = pool.strategy === 'random' ? '随机' : '轮询';
+    var stratName = pool.strategy === 'random' ? 'random' : 'round-robin';
 
     var acctRows = pool.accounts.map(function (a) {
       return '<div class="row">' +
         '<div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div>' +
         '<div class="row-sub">' + escapeHtml(a.detail) + '</div></div>' +
-        '<span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? '可用' : '冷却中') + '</span>' +
-        '<button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '" style="padding:4px 10px;font-size:12px">移除</button>' +
+        '<span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? 'available' : 'cooling down') + '</span>' +
+        '<button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '" style="padding:4px 10px;font-size:12px">Remove</button>' +
         '</div>';
     }).join('');
     if (pool.size === 0) {
-      acctRows = '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">账号池为空 — 使用本机凭据文件的单账号</div></div></div>';
+      acctRows = '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">Account pool is empty — falling back to the single account in the local credential file</div></div></div>';
+    }
+
+    // Pool readiness banner. "Size > 0" is not the same as "usable": every
+    // account can be cooling down or need a fresh web login, and the previous
+    // panel showed a green dot in that state.
+    var health = pool.health;
+    var healthBanner = '';
+    if (health) {
+      var tone = health.ready ? (health.state === 'degraded' ? 'warn' : 'ok') : 'error';
+      var label = health.state === 'empty' ? 'No accounts' :
+                  health.state === 'ready' ? 'Ready' :
+                  health.state === 'degraded' ? 'Degraded' : 'Unavailable';
+      var detail = health.state === 'empty'
+        ? 'Every /v1 request will fail until an account is added.'
+        : health.available + ' of ' + health.size + ' account(s) usable.';
+      healthBanner = '<div class="card"><div class="card-header"><h3 class="card-title">Pool readiness</h3>' +
+        '<span class="pill ' + tone + '">' + label + '</span></div>' +
+        '<div class="rows"><div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(detail) + '</div>' +
+        (health.accounts.some(function (a) { return a.last_error; })
+          ? '<div class="row-sub">' + health.accounts.filter(function (a) { return a.last_error; })
+              .map(function (a) { return escapeHtml(a.label) + ': ' + escapeHtml(a.last_error); }).join(' · ') + '</div>'
+          : '') +
+        '</div></div></div></div>';
     }
 
     var isRR = pool.strategy === 'round-robin';
-    return '<section class="section"><h2>上游与凭据</h2>' +
-      '<p class="page-sub">账号池内的凭据按请求轮流使用；池为空时回落到本机凭据文件。凭据值永不显示、不落盘。</p>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">账号池</h3>' +
+    return '<section class="section"><h2>Upstream &amp; Credentials</h2>' +
+      '<p class="page-sub">Pooled credentials rotate per request; when the pool is empty the gateway falls back to the local credential file. Credential values are never displayed or written to disk.</p>' +
+      (d.notice ? '<div class="card"><div class="card-header"><h3 class="card-title">Startup notice</h3><span class="pill warn">attention</span></div>' +
+        '<div class="rows"><div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(d.notice) + '</div></div></div></div></div>' : '') +
+      healthBanner +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Account pool</h3>' +
       '<div class="controls">' +
-      '<div class="seg" role="tablist"><button class="seg-btn' + (isRR ? ' active' : '') + '" data-strategy="round-robin" role="tab" aria-selected="' + isRR + '">轮询</button>' +
-      '<button class="seg-btn' + (!isRR ? ' active' : '') + '" data-strategy="random" role="tab" aria-selected="' + !isRR + '">随机</button></div>' +
+      '<div class="seg" role="tablist"><button class="seg-btn' + (isRR ? ' active' : '') + '" data-strategy="round-robin" role="tab" aria-selected="' + isRR + '">Round-robin</button>' +
+      '<button class="seg-btn' + (!isRR ? ' active' : '') + '" data-strategy="random" role="tab" aria-selected="' + !isRR + '">Random</button></div>' +
       '</div></div>' +
       '<div class="rows" id="acct-rows">' + acctRows + '</div>' +
       (pool.size === 0
         ? ''
-        : '<div class="card-footer"><div class="footer-note">' + pool.size + ' 个账号 · ' + stratName + '调度 · 401 的账号自动冷却后重试</div></div>') +
+        : '<div class="card-footer"><div class="footer-note">' + pool.size + ' account(s) · ' + stratName + ' scheduling · accounts returning 401 cool down and retry automatically</div></div>') +
       '</div>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">添加账号</h3><span class="card-note">官方网页登录</span></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Add account</h3><span class="card-note">official web sign-in</span></div>' +
       '<div class="login-form">' +
-      '<p class="form-hint">点击后在 WorkBuddy 官方网页完成登录，网关会自动将账号加入池中。不需要安装桌面客户端，也不用复制 Token。密码和验证码只在官方页面输入。</p>' +
-      '<label class="form-label" for="oauth-note">账号备注（可选）</label><input class="key-input" id="oauth-note" maxlength="64" placeholder="例如：工作账号">' +
-      '<div class="controls"><button class="btn" id="oauth-start">登录 WorkBuddy</button><button class="btn secondary" id="oauth-cancel" hidden>取消登录</button></div>' +
-      '<p class="form-hint" id="oauth-status" role="status" aria-live="polite">登录结果会自动显示，无需刷新。</p>' +
-      '<a id="oauth-link" class="form-hint" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden>打开官方登录页面</a>' +
-      '<p class="form-hint">账号会加密保存；重启网关后自动恢复，无需重新登录。</p>' +
+      '<p class="form-hint">Click to sign in on the official WorkBuddy web page; the gateway adds the account to the pool automatically. No desktop client to install and no token to copy. Passwords and verification codes are entered on the official page only.</p>' +
+      '<label class="form-label" for="oauth-note">Account note (optional)</label><input class="key-input" id="oauth-note" maxlength="64" placeholder="e.g. work account">' +
+      '<div class="controls"><button class="btn" id="oauth-start">Sign in to WorkBuddy</button><button class="btn secondary" id="oauth-cancel" hidden>Cancel sign-in</button></div>' +
+      '<p class="form-hint" id="oauth-status" role="status" aria-live="polite">The result appears here automatically — no refresh needed.</p>' +
+      '<a id="oauth-link" class="form-hint" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden>Open the official sign-in page</a>' +
+      '<p class="form-hint">Accounts are stored encrypted and restored automatically after a gateway restart — no need to sign in again.</p>' +
       '</div></div>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">账号池状态</h3><span class="pill ' + (c.ok ? 'ok' : 'error') + '">' + (c.ok ? '可用' : '不可用') + '</span></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Pool status</h3><span class="pill ' + (c.ok ? 'ok' : 'error') + '">' + (c.ok ? 'available' : 'unavailable') + '</span></div>' +
       '<div class="rows">' +
-      '<div class="row"><div class="row-main"><div class="row-title">来源</div></div><div class="row-value">' + escapeHtml(c.source) + '</div></div>' +
-      '<div class="row"><div class="row-main"><div class="row-title">凭据状态</div><div class="row-sub">' + escapeHtml(c.ok ? c.detail : '账号池为空，请登录 WorkBuddy') + '</div></div></div>' +
+      '<div class="row"><div class="row-main"><div class="row-title">Source</div></div><div class="row-value">' + escapeHtml(c.source) + '</div></div>' +
+      '<div class="row"><div class="row-main"><div class="row-title">Credential status</div><div class="row-sub">' + escapeHtml(c.ok ? c.detail : 'Account pool is empty — sign in to WorkBuddy') + '</div></div></div>' +
       '</div></div>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">上游端点</h3></div><div class="rows">' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Upstream endpoint</h3></div><div class="rows">' +
       '<div class="row"><div class="row-main"><div class="row-title">URL</div></div><div class="row-value" style="font-family:ui-monospace,Consolas,monospace;font-size:12px">' + escapeHtml(u.url) + '</div></div>' +
       '<div class="row"><div class="row-main"><div class="row-title">User-Agent</div></div><div class="row-value" style="font-family:ui-monospace,Consolas,monospace;font-size:12px">' + escapeHtml(u.user_agent) + '</div></div>' +
       '</div></div>' +
-      '<div class="controls"><button class="btn" id="refresh-now">立即刷新</button></div>' +
+      '<div class="controls"><button class="btn" id="refresh-now">Refresh now</button></div>' +
       '</section>';
   }
 
@@ -779,8 +976,8 @@ td .muted { color: var(--text-tertiary); }
     if (!rows) return;
     var accounts = d.pool.accounts;
     var html = accounts.map(function (a) {
-      return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div><div class="row-sub">' + escapeHtml(a.detail) + '</div></div><span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? '可用' : '等待恢复') + '</span><button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '">移除</button></div>';
-    }).join('') || '<div class="row"><div class="row-title">账号池为空，点击下方按钮登录账号。</div></div>';
+      return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div><div class="row-sub">' + escapeHtml(a.detail) + '</div></div><span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? 'available' : 'recovering') + '</span><button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '">Remove</button></div>';
+    }).join('') || '<div class="row"><div class="row-title">Account pool is empty — use the button below to sign in.</div></div>';
     if (rows.dataset.snapshot !== html) { rows.innerHTML = html; rows.dataset.snapshot = html; }
     document.querySelectorAll('[data-strategy]').forEach(function (button) {
       var selected = button.dataset.strategy === d.pool.strategy;
@@ -793,9 +990,9 @@ td .muted { color: var(--text-tertiary); }
     var start = $('#oauth-start'), cancel = $('#oauth-cancel'), status = $('#oauth-status'), link = $('#oauth-link');
     if (!start) return;
     start.disabled = state.oauthBusy || !!state.oauth;
-    start.textContent = state.oauthBusy ? '正在准备登录…' : '登录 WorkBuddy';
+    start.textContent = state.oauthBusy ? 'Preparing sign-in…' : 'Sign in to WorkBuddy';
     cancel.hidden = !state.oauth;
-    status.textContent = state.oauthMessage || '登录结果会自动显示，无需刷新。';
+    status.textContent = state.oauthMessage || 'The result appears here automatically — no refresh needed.';
     link.hidden = !state.oauthUrl;
     if (state.oauthUrl) link.href = state.oauthUrl;
     else link.removeAttribute('href');
@@ -809,16 +1006,16 @@ td .muted { color: var(--text-tertiary); }
       if (result.status === 'completed') {
         state.oauth = null;
         state.oauthUrl = '';
-        state.oauthMessage = '登录成功，' + result.account_label + ' 已加入账号池。';
+        state.oauthMessage = 'Signed in. ' + result.account_label + ' was added to the pool.';
         updateOAuthView();
         return refreshOverview();
       }
       if (['failed', 'expired', 'cancelled'].indexOf(result.status) >= 0) {
         state.oauth = null;
         state.oauthUrl = '';
-        state.oauthMessage = result.status === 'expired' ? '登录已超时，请重新开始。' : result.status === 'cancelled' ? '已取消登录。' : '登录失败：' + (result.error || '请重试');
+        state.oauthMessage = result.status === 'expired' ? 'Sign-in timed out. Start again.' : result.status === 'cancelled' ? 'Sign-in cancelled.' : 'Sign-in failed: ' + (result.error || 'try again');
       } else {
-        state.oauthMessage = result.status === 'pending' ? '等待你在官方网页完成登录…' : '授权已完成，正在确认账号…';
+        state.oauthMessage = result.status === 'pending' ? 'Waiting for you to finish signing in on the official page…' : 'Authorization received — confirming the account…';
         state.oauthTimer = setTimeout(pollOAuth, 1500);
       }
       updateOAuthView();
@@ -839,25 +1036,25 @@ td .muted { color: var(--text-tertiary); }
       var popup = window.open('about:blank', '_blank');
       if (popup) {
         popup.opener = null;
-        popup.document.title = '正在打开官方登录页';
-        popup.document.body.textContent = '正在准备 WorkBuddy 登录，请稍候。';
+        popup.document.title = 'Opening the official sign-in page';
+        popup.document.body.textContent = 'Preparing WorkBuddy sign-in, please wait.';
         var meta = popup.document.createElement('meta');
         meta.name = 'referrer'; meta.content = 'no-referrer'; popup.document.head.appendChild(meta);
       }
       state.oauthBusy = true;
-      state.oauthMessage = '正在申请官方登录链接…';
+      state.oauthMessage = 'Requesting an official sign-in link…';
       updateOAuthView();
       var note = $('#oauth-note').value.trim();
       api('oauth/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: note || undefined }) }).then(function (result) {
         state.oauth = result.id;
         state.oauthUrl = result.authorization_url;
-        state.oauthMessage = '请在新打开的官方网页完成登录；未弹出时点击下方链接。';
+        state.oauthMessage = 'Finish signing in on the official page that just opened; if it was blocked, use the link below.';
         if (popup && !popup.closed) popup.location.replace(result.authorization_url);
         clearTimeout(state.oauthTimer);
         state.oauthTimer = setTimeout(pollOAuth, 1500);
       }).catch(function (error) {
         if (popup && !popup.closed) popup.close();
-        state.oauthMessage = error.code === 'oauth_already_pending' ? '此浏览器已有登录正在进行，请完成它或等待过期。' : error.message;
+        state.oauthMessage = error.code === 'oauth_already_pending' ? 'This browser already has a sign-in in progress. Finish it or wait for it to expire.' : error.message;
       }).finally(function () { state.oauthBusy = false; updateOAuthView(); });
     });
     $('#oauth-cancel').addEventListener('click', function () {
@@ -867,7 +1064,7 @@ td .muted { color: var(--text-tertiary); }
         if (state.oauth !== id) return;
         clearTimeout(state.oauthTimer);
         state.oauth = null; state.oauthUrl = '';
-        state.oauthMessage = result.status === 'completed' ? '账号已登录并加入池中。' : '已取消登录。';
+        state.oauthMessage = result.status === 'completed' ? 'The account signed in and joined the pool.' : 'Sign-in cancelled.';
         updateOAuthView();
         return refreshOverview();
       }).catch(function (error) { state.oauthMessage = error.message; updateOAuthView(); });

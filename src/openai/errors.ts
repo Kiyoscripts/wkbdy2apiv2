@@ -5,6 +5,7 @@ export type ApiErrorCode =
   | 'unsupported_parameter'
   | 'model_not_found'
   | 'not_found'
+  | 'permission_denied'
   | 'insufficient_quota'
   | 'rate_limit_exceeded'
   | 'upstream_authentication_error'
@@ -19,6 +20,7 @@ const TYPE_BY_CODE: Record<ApiErrorCode, string> = {
   unsupported_parameter: 'invalid_request_error',
   model_not_found: 'invalid_request_error',
   not_found: 'invalid_request_error',
+  permission_denied: 'permission_error',
   insufficient_quota: 'insufficient_quota',
   rate_limit_exceeded: 'rate_limit_error',
   upstream_authentication_error: 'upstream_authentication_error',
@@ -34,6 +36,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   unsupported_parameter: 400,
   model_not_found: 404,
   not_found: 404,
+  permission_denied: 403,
   insufficient_quota: 429,
   rate_limit_exceeded: 429,
   upstream_authentication_error: 502,

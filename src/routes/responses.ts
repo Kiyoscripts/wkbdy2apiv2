@@ -7,11 +7,18 @@ import { mapUpstreamError } from './chat-completions.js';
 import type { ExposedModel } from '../workbuddy/model-catalog.js';
 import type { WorkBuddyClient, UpstreamChunk } from '../workbuddy/client.js';
 import type { MetricsCollector } from '../observability/metrics.js';
+import { extractApiKey, keyFingerprint } from '../security/downstream-auth.js';
+import { createRecorder } from './request-context.js';
+import type { CredentialPool } from '../workbuddy/credential-pool.js';
 
 type ResponsesOptions = {
   models: ExposedModel[];
   client: WorkBuddyClient;
   metrics: MetricsCollector;
+  /** Credential source, used to attribute usage and failures to an account. */
+  pool?: CredentialPool;
+  /** Usage sink, used to charge per-key token quotas after a response completes. */
+  onUsage?: (usage: { keyId?: string; account?: string; model?: string; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }) => void;
 };
 
 function responseOptions(request: ReturnType<typeof responsesRequestSchema.parse>) {
@@ -31,47 +38,75 @@ export function responsesRoutes(app: FastifyInstance, opts: ResponsesOptions): v
   app.post('/responses', async (req, reply) => {
     const began = performance.now();
     const body = normalizeOpenAiRequestBody(req.body) as Record<string, unknown>;
-    let recorded = false;
-    const record = (status: number, builder?: ResponsesBuilder, errorCode?: string) => {
-      if (recorded) return;
-      recorded = true;
-      const usage = builder?.build;
-      opts.metrics.record({
-        method: 'POST',
-        path: '/v1/responses',
-        model: typeof body.model === 'string' ? body.model : undefined,
-        stream: body.stream === true,
+    let model: string | undefined;
+    let streaming = false;
+    let usageCharged = false;
+    const keyId = keyFingerprint(extractApiKey(req.headers).value);
+    const recorder = createRecorder({
+      req,
+      path: '/v1/responses',
+      metrics: opts.metrics,
+      startedAt: began,
+      keyId,
+      describe: () => ({
+        ...(model !== undefined ? { model } : {}),
+        stream: streaming,
+        ...(opts.pool?.describe() !== undefined ? { account: opts.pool.describe() } : {}),
+      }),
+    });
+    const record = (status: number, errorCode?: string) => {
+      recorder.finish({
         status,
-        duration_ms: Math.round(performance.now() - began),
         ...(errorCode ? { error_code: errorCode } : {}),
+        // Token counts are only known once the response is assembled; the
+        // recorder is told at finish time so the row is complete.
+        ...(usageForRecord ?? {}),
       });
-      void usage;
     };
+    /**
+     * Charge the per-key quota once, from the assembled response usage.
+     *
+     * Note the subtlety that made the previous implementation a no-op: the
+     * original code read `builder?.build` without calling it, so `usage` was a
+     * function reference and every `/v1/responses` row had zero tokens. The
+     * usage is therefore passed in explicitly by the caller that built the
+     * response.
+     */
+    const chargeUsage = (usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => {
+      if (usageCharged) return;
+      usageCharged = true;
+      opts.onUsage?.({ keyId, account: opts.pool?.describe(), model, usage });
+    };
+    // Re-read the real builder usage at record time: `record` is called after
+    // the response is fully built, so a captured value would be stale.
+    let usageForRecord: { prompt_tokens: number; completion_tokens: number } | undefined;
 
     const parsed = responsesRequestSchema.safeParse(body);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       const param = issue?.path.join('.') || null;
       const error = openAiError(400, 'invalid_request', issue?.message ?? 'Invalid Responses request.', param);
-      record(400, undefined, error.body.error.code);
+      record(400, error.body.error.code);
       return reply.code(400).send(error.body);
     }
 
     const request = parsed.data;
-    const model = opts.models.find((entry) => entry.id === request.model);
-    if (!model) {
+    model = request.model;
+    streaming = request.stream === true;
+    const entry = opts.models.find((item) => item.id === request.model);
+    if (!entry) {
       const error = openAiError(404, 'model_not_found', `Model '${request.model}' not found.`);
-      record(404, undefined, error.body.error.code);
+      record(404, error.body.error.code);
       return reply.code(404).send(error.body);
     }
-    if (model.x_workbuddy.max_output_tokens && request.max_output_tokens !== undefined && request.max_output_tokens > model.x_workbuddy.max_output_tokens) {
+    if (entry.x_workbuddy.max_output_tokens && request.max_output_tokens !== undefined && request.max_output_tokens > entry.x_workbuddy.max_output_tokens) {
       const error = openAiError(400, 'invalid_request', 'max_output_tokens exceeds the configured model output limit.', 'max_output_tokens');
-      record(400, undefined, error.body.error.code);
+      record(400, error.body.error.code);
       return reply.code(400).send(error.body);
     }
-    if (request.tools?.length && model.x_workbuddy.supports_tool_call === false) {
+    if (request.tools?.length && entry.x_workbuddy.supports_tool_call === false) {
       const error = openAiError(400, 'invalid_request', 'This model does not support function tools.', 'tools');
-      record(400, undefined, error.body.error.code);
+      record(400, error.body.error.code);
       return reply.code(400).send(error.body);
     }
 
@@ -81,7 +116,7 @@ export function responsesRoutes(app: FastifyInstance, opts: ResponsesOptions): v
     } catch (error) {
       const message = error instanceof ResponsesInputError ? error.message : 'Invalid Responses request.';
       const mapped = openAiError(400, 'invalid_request', message);
-      record(400, undefined, mapped.body.error.code);
+      record(400, mapped.body.error.code);
       return reply.code(400).send(mapped.body);
     }
 
@@ -92,13 +127,24 @@ export function responsesRoutes(app: FastifyInstance, opts: ResponsesOptions): v
     reply.raw.on('close', onClose);
 
     try {
-      const stream = await opts.client.streamChatCompletion(upstream, abort.signal, true, true);
+      const stream = await opts.client.streamChatCompletion(upstream, abort.signal, true, true, recorder.attempts);
       const builder = new ResponsesBuilder();
 
       if (!request.stream) {
         for await (const chunk of stream) builder.push(chunk);
         const response = builder.build(responseOptions(request));
-        record(200, builder);
+        const usage = response.usage
+          ? {
+              prompt_tokens: response.usage.input_tokens,
+              completion_tokens: response.usage.output_tokens,
+              total_tokens: response.usage.total_tokens,
+            }
+          : undefined;
+        chargeUsage(usage);
+        usageForRecord = usage
+          ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens }
+          : undefined;
+        record(200);
         return response;
       }
 
@@ -182,11 +228,22 @@ export function responsesRoutes(app: FastifyInstance, opts: ResponsesOptions): v
         if (item) writeEvent('response.output_item.done', { output_index: outputIndex, item });
       }
       writeEvent('response.completed', { response });
-      record(200, builder);
+      const streamUsage = response.usage
+        ? {
+            prompt_tokens: response.usage.input_tokens,
+            completion_tokens: response.usage.output_tokens,
+            total_tokens: response.usage.total_tokens,
+          }
+        : undefined;
+      chargeUsage(streamUsage);
+      usageForRecord = streamUsage
+        ? { prompt_tokens: streamUsage.prompt_tokens, completion_tokens: streamUsage.completion_tokens }
+        : undefined;
+      record(200);
       reply.raw.end();
     } catch (error) {
       const mapped = mapUpstreamError(error);
-      record(abort.signal.aborted ? 499 : mapped.statusCode, undefined, mapped.body.error.code);
+      record(abort.signal.aborted ? 499 : mapped.statusCode, mapped.body.error.code);
       if (!reply.raw.headersSent) return reply.code(mapped.statusCode).send(mapped.body);
       if (!reply.raw.destroyed && !abort.signal.aborted) {
         reply.raw.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: mapped.body.error })}\n\n`);

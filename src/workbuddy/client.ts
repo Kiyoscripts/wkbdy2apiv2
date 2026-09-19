@@ -30,6 +30,18 @@ export type UpstreamUsage = {
 
 export type StreamResult = AsyncGenerator<UpstreamChunk, void, void>;
 
+/**
+ * Per-attempt accounting for one downstream request. Returns by reference from
+ * the client so the route can persist how much retrying happened; without it a
+ * latency spike caused by upstream 502 retries looks identical to a slow model.
+ */
+export type UpstreamAttempts = {
+  /** Upstream HTTP attempts made (including retries). */
+  attempts: number;
+  /** attempts - 1, for convenience. */
+  retries: number;
+};
+
 export type ClientOptions = {
   upstreamUrl: string;
   credentials: CredentialLike;
@@ -97,8 +109,15 @@ export class WorkBuddyClient {
     signal: AbortSignal,
     allowAuthRetry = true,
     requireDone = false,
+    attempts?: UpstreamAttempts,
   ): Promise<StreamResult> {
+    const count = () => {
+      if (!attempts) return;
+      attempts.attempts += 1;
+      attempts.retries = attempts.attempts - 1;
+    };
     let credential = await this.opts.credentials.getCredential();
+    count();
     let res = await this.attempt(body, signal, credential);
 
     // Cloudflare/edge challenges can return an HTML 401/403 page. That is not
@@ -109,6 +128,7 @@ export class WorkBuddyClient {
       await res.body?.cancel().catch(() => {});
       if (signal.aborted) throw signal.reason;
       await abortableDelay(500, signal);
+      count();
       res = await this.attempt(body, signal, credential);
       if ((res.status === 401 || res.status === 403) && isHtmlResponse(res)) {
         await res.body?.cancel().catch(() => {});
@@ -125,6 +145,7 @@ export class WorkBuddyClient {
         this.opts.credentials.invalidate();
         credential = await this.opts.credentials.getCredential();
       }
+      count();
       res = await this.attempt(body, signal, credential);
     }
     if (res.status === 401 || res.status === 403) this.opts.credentials.reportFailure?.(credential.accessToken);
@@ -137,6 +158,7 @@ export class WorkBuddyClient {
       await res.body?.cancel().catch(() => {});
       if (signal.aborted) throw signal.reason;
       await abortableDelay(500, signal);
+      count();
       res = await this.attempt(body, signal, credential);
     }
 
