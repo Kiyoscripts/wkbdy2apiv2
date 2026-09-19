@@ -16,6 +16,11 @@ COPY src ./src
 COPY wb_v3config.public.json ./
 COPY tests ./tests
 COPY fixtures ./fixtures
+# `tests/leak-scan.test.ts` reads these two at the project root to prove no
+# credential is baked into them. They have to be present for `pnpm test` to run
+# at all — and .dockerignore must not exclude them either, since that is what the
+# scan is checking. Neither is copied into the runtime stage.
+COPY Dockerfile docker-compose.yml ./
 RUN pnpm typecheck && pnpm test
 
 # ---- production stage -----------------------------------------------------
