@@ -485,3 +485,80 @@ describe('log window copy', () => {
     expect(script).toContain("buffer holds ' + MAX_LOG +");
   });
 });
+
+/**
+ * The overview's own counters are in-memory and reset on every restart, which
+ * is exactly when an operator wants a number that did not. These cover the
+ * durable-totals card that answers from the database instead, including the
+ * backend where the question has no answer at all.
+ */
+describe('durable totals card', () => {
+  async function overviewPanel(usage: () => Promise<Response> | Response) {
+    const w = new Window({ url: 'http://127.0.0.1:8787/admin' });
+    windows.push(w);
+    const calls: string[] = [];
+    w.fetch = (async (path: string) => {
+      calls.push(path);
+      if (path.includes('/usage')) return usage();
+      return { ok: true, status: 200, json: async () => ({ ...overview, credential: { ok: true, source: 'pool', detail: '' } }) } as Response;
+    }) as never;
+    w.document.write(adminPanelHtml());
+    w.eval(w.document.querySelector('script')!.textContent!);
+    (w.document.querySelector('#key-input') as unknown as HTMLInputElement).value = 'test-only-admin-key';
+    (w.document.querySelector('#key-submit') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#usage-body')).toBeTruthy());
+    return { w, calls };
+  }
+
+  const body = (w: Window) => w.document.querySelector('#usage-body')?.textContent ?? '';
+  const usageOk = (data: unknown) => ({ ok: true, status: 200, json: async () => data } as Response);
+
+  it('shows windowed totals from the database and defaults to 24h', async () => {
+    const { w, calls } = await overviewPanel(() => usageOk({
+      requests: 18422, errors: 31, prompt_tokens: 900, completion_tokens: 1100,
+      per_model: [{ model: 'wb-2', requests: 15000, tokens: 2000 }],
+    }) as unknown as Response);
+    await vi.waitFor(() => expect(body(w)).toContain('18,422'));
+    expect(body(w)).toContain('wb-2');
+    expect(body(w)).toContain('2,000');
+    // The window is requested explicitly, not left to the server default.
+    expect(calls.some((c) => c.includes('window=24'))).toBe(true);
+  });
+
+  it('asks for the new window when the range is switched', async () => {
+    const { w, calls } = await overviewPanel(() => usageOk({ requests: 5, errors: 0, prompt_tokens: 0, completion_tokens: 0, per_model: [] }) as unknown as Response);
+    await vi.waitFor(() => expect(body(w)).toContain('5'));
+    (w.document.querySelector('[data-usage-window="168"]') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(calls.some((c) => c.includes('window=168'))).toBe(true));
+  });
+
+  it('explains the file backend instead of showing zeros', async () => {
+    const { w } = await overviewPanel(() => ({
+      ok: false, status: 503,
+      json: async () => ({ error: { code: 'internal_error', message: 'Usage aggregation requires the postgres storage backend (WKB2API_STORAGE_BACKEND=postgres).' } }),
+    } as Response));
+
+    await vi.waitFor(() => expect(body(w)).toContain('requires the postgres storage backend'));
+    // A zero here would read as "no usage", which is a different claim.
+    expect(body(w)).not.toContain('Requests');
+    expect(w.document.querySelector('#usage-body')?.textContent).not.toBe('0');
+    // The remedy is offered rather than leaving the reader stuck.
+    expect(w.document.querySelector('#main')?.textContent).toContain('WKB2API_STORAGE_BACKEND=postgres');
+  });
+
+  it('distinguishes an empty window from an unavailable backend', async () => {
+    const { w } = await overviewPanel(() => usageOk({ requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0, per_model: [] }) as unknown as Response);
+    await vi.waitFor(() => expect(body(w)).toContain('No requests recorded in this window'));
+    expect(body(w)).not.toContain('postgres storage backend');
+  });
+
+  it('labels the reset-prone tiles as scoped to the current run', async () => {
+    const { w } = await overviewPanel(() => usageOk({ requests: 1, errors: 0, prompt_tokens: 0, completion_tokens: 0, per_model: [] }) as unknown as Response);
+    const labels = [...w.document.querySelectorAll('.stat-label')].map((el) => el.textContent ?? '');
+    // "Total requests: 0" next to a populated history is what confused people
+    // after a redeploy; the scope has to be in the label itself.
+    expect(labels).toContain('Requests since restart');
+    expect(labels).toContain('Tokens since restart');
+    expect(labels).not.toContain('Total requests');
+  });
+});

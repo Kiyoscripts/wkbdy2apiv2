@@ -638,6 +638,9 @@ td .muted { color: var(--text-tertiary); }
     requests: null,
     reqFilter: '',
     reqStatuses: [],
+    // Durable usage window (hours) and its last result or unavailability.
+    usageWindow: 24,
+    usage: null,
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -866,7 +869,7 @@ td .muted { color: var(--text-tertiary); }
     var dot = $('#health-dot');
     if (dot) dot.classList.toggle('down', d.credential.ok === false && !(d.pool && d.pool.accounts.some(function (a) { return a.ok; })));
 
-    if (state.view === 'overview') main.innerHTML = viewOverview(d);
+    if (state.view === 'overview') { main.innerHTML = viewOverview(d); wireUsageCard(); loadUsage(); }
     else if (state.view === 'models') main.innerHTML = viewModels(d);
     else if (state.view === 'requests') { main.innerHTML = viewRequestsShell(); wireRequestFilters(); loadRequests(); }
     else if (state.view === 'keys') { main.innerHTML = viewKeysShell(); loadKeys(); }
@@ -911,22 +914,148 @@ td .muted { color: var(--text-tertiary); }
       : '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">No errors recorded</div></div></div>';
 
     return '<section class="section"><h2>Overview</h2>' +
-      '<p class="page-sub">Gateway up ' + fmtUptime(s.uptime_ms) + '. Totals count every request since the gateway restarted; ' +
-      'the log keeps the most recent ' + MAX_LOG + '. Data refreshes every 5 seconds.</p>' +
+      '<p class="page-sub">Gateway up ' + fmtUptime(s.uptime_ms) + '.' +
+      (d.started_at ? ' Started ' + escapeHtml(fmtStamp(d.started_at)) + '.' : '') +
+      ' These figures count only the current run and return to zero after a restart or redeploy, ' +
+      'so use Durable totals below for numbers that survive one. The log keeps the most recent ' + MAX_LOG + '.</p>' +
       '<div class="stat-grid">' +
-      statTile('Total requests', fmtInt(s.total_requests), '', 'stat-total') +
-      statTile('Error rate', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok', 'stat-errors') +
+      statTile('Requests since restart', fmtInt(s.total_requests), '', 'stat-total') +
+      statTile('Error rate since restart', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok', 'stat-errors') +
       statTile('P95 latency', fmtMs(s.p95_ms), '', 'stat-p95') +
-      statTile('Token usage', fmtInt(s.tokens.prompt + s.tokens.completion), '', 'stat-tokens') +
-      statTile('Retries', fmtInt(s.total_retries || 0) + (s.retry_rate ? ' · ' + fmtPct(s.retry_rate) : ''), '', 'stat-retries') +
+      statTile('Tokens since restart', fmtInt(s.tokens.prompt + s.tokens.completion), '', 'stat-tokens') +
+      statTile('Retries since restart', fmtInt(s.total_retries || 0) + (s.retry_rate ? ' · ' + fmtPct(s.retry_rate) : ''), '', 'stat-retries') +
       '</div>' +
       '<div class="card"><div class="card-header"><h3 class="card-title">Calls by model</h3>' +
-      '<span class="card-note">cumulative since restart · bar shows request volume, red is the failing share</span></div>' +
+      '<span class="card-note">this run · bar shows request volume, red is the failing share</span></div>' +
       '<div class="rows">' + modelRows + '</div></div>' +
       '<div class="card"><div class="card-header"><h3 class="card-title">Error codes</h3>' +
-      '<span class="card-note">cumulative since restart</span></div>' +
+      '<span class="card-note">this run</span></div>' +
       '<div class="rows">' + errorCodes + '</div></div>' +
+      usageCard() +
       '</section>';
+  }
+
+  /**
+   * Durable usage over a rolling window.
+   *
+   * The tiles above reset whenever the process restarts, which is exactly the
+   * moment an operator wants a number that did not. These come from the
+   * database, so they survive a redeploy. The card renders its own loading and
+   * unavailable states rather than zeros, because on the file backend the
+   * question has no answer and saying "0" would be a lie.
+   */
+  function usageCard() {
+    // The body is painted by renderUsageBody/renderUsageRows; the initial
+    // markup is the same loading row so the first paint and every refetch agree.
+    var u = state.usage;
+    var body;
+    if (u && u.unavailable) {
+      body = '<div class="rows"><div class="row"><div class="row-main">' +
+        '<div class="row-sub">' + escapeHtml(u.unavailable) + '</div></div></div></div>';
+    } else if (u && u.data) {
+      var scratch = document.createElement('div');
+      renderUsageRows(scratch, u);
+      body = scratch.innerHTML;
+    } else {
+      body = '<div class="rows"><div class="row"><div class="row-main"><div class="row-sub">Loading…</div></div></div></div>';
+    }
+    var note = u && u.data && u.windowHours
+      ? 'survives restarts · last ' + u.windowHours + 'h'
+      : 'survives restarts';
+    var seg = [24, 168].map(function (h) {
+      var label = h === 24 ? '24 hours' : '7 days';
+      var on = state.usageWindow === h;
+      return '<button class="seg-btn' + (on ? ' active' : '') + '" data-usage-window="' + h + '" role="tab" aria-selected="' + on + '">' + label + '</button>';
+    }).join('');
+    return '<div class="card"><div class="card-header"><h3 class="card-title">Durable totals</h3>' +
+      '<div class="controls">' +
+      '<div class="seg" role="tablist">' + seg + '</div>' +
+      '<span class="card-note">' + escapeHtml(note) + '</span>' +
+      '</div></div>' +
+      '<div id="usage-body">' + body + '</div>' +
+      (u && u.reason ? '<div class="card-footer"><div class="footer-note">' + escapeHtml(u.reason) + '</div></div>' : '') +
+      '</div>';
+  }
+
+  function loadUsage() {
+    var hours = state.usageWindow;
+    var host = $('#usage-body');
+    if (host) host.innerHTML = '<div class="rows"><div class="row"><div class="row-main"><div class="row-sub">Loading…</div></div></div></div>';
+    return api('usage?window=' + hours).then(function (d) {
+      state.usage = { data: d, windowHours: hours };
+      renderUsageBody();
+      return null;
+    }).catch(function (err) {
+      // The file backend genuinely cannot answer this, so the reason is shown
+      // verbatim instead of a zero that would read as "no usage".
+      state.usage = {
+        unavailable: err.message || 'Durable usage is not available on this backend.',
+        reason: err.code === 'internal_error' ? 'Set WKB2API_STORAGE_BACKEND=postgres to enable durable totals.' : '',
+      };
+      renderUsageBody();
+      return null;
+    });
+  }
+
+  /** Repaint only the usage card, so a refresh cannot disturb the rest. */
+  function renderUsageBody() {
+    var host = $('#usage-body');
+    if (!host) return;
+    var u = state.usage;
+    if (!u) { host.innerHTML = '<div class="rows"><div class="row"><div class="row-main"><div class="row-sub">Loading…</div></div></div></div>'; return; }
+    if (u.unavailable) {
+      host.innerHTML = '<div class="rows"><div class="row"><div class="row-main">' +
+        '<div class="row-sub">' + escapeHtml(u.unavailable) + '</div></div></div></div>';
+      var foot = host.parentNode && host.parentNode.querySelector('.footer-note');
+      if (!foot && u.reason && host.parentNode) {
+        var node = document.createElement('div');
+        node.className = 'card-footer';
+        node.innerHTML = '<div class="footer-note">' + escapeHtml(u.reason) + '</div>';
+        host.parentNode.appendChild(node);
+      }
+      return;
+    }
+    renderUsageRows(host, u);
+  }
+
+  /** The rows themselves, shared by first paint and refetch. */
+  function renderUsageRows(host, u) {
+    var d = u.data;
+    if (!d || !d.requests) {
+      host.innerHTML = '<div class="rows"><div class="row"><div class="row-main">' +
+        '<div class="row-sub">No requests recorded in this window.</div></div></div></div>';
+      return;
+    }
+    var rows = [
+      ['Requests', fmtInt(d.requests)],
+      ['Errors', fmtInt(d.errors || 0)],
+      ['Tokens', fmtInt((d.prompt_tokens || 0) + (d.completion_tokens || 0))],
+    ].map(function (pair) {
+      return '<div class="row"><div class="row-main"><div class="row-title">' + pair[0] + '</div></div>' +
+        '<div class="row-value">' + pair[1] + '</div></div>';
+    }).join('');
+    var models = (d.per_model || []).slice(0, 5).map(function (m) {
+      return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(m.model) + '</div></div>' +
+        '<div class="row-value">' + fmtInt(m.requests) + ' req · ' + fmtInt(m.tokens) + ' tok</div></div>';
+    }).join('');
+    host.innerHTML = '<div class="rows">' + rows + models + '</div>';
+  }
+
+  function wireUsageCard() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-usage-window]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var hours = Number(btn.getAttribute('data-usage-window'));
+        if (hours === state.usageWindow) return;
+        state.usageWindow = hours;
+        Array.prototype.forEach.call(document.querySelectorAll('[data-usage-window]'), function (b) {
+          var on = Number(b.getAttribute('data-usage-window')) === hours;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        state.usage = null;
+        loadUsage();
+      });
+    });
   }
 
   function viewModels(d) {
