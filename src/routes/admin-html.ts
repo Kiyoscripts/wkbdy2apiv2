@@ -444,7 +444,9 @@ td .muted { color: var(--text-tertiary); }
   overflow: hidden;
   min-width: 80px;
 }
-.bar-fill { height: 100%; border-radius: 2px; background: var(--accent); }
+.bar-fill { height: 100%; border-radius: 2px; background: var(--accent); position: relative; overflow: hidden; }
+/* Failing share of a model's requests, drawn at the trailing end of its bar. */
+.bar-errors { position: absolute; top: 0; right: 0; height: 100%; background: var(--error); border-radius: 2px; }
 
 /* responsive: sidebar collapses to top bar */
 @media (max-width: 720px) {
@@ -543,6 +545,8 @@ td .muted { color: var(--text-tertiary); }
 .reveal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .reveal-title { font-size: 13px; font-weight: 650; }
 .reveal-note { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; line-height: 1.55; }
+.reveal-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.reveal-saved { font-size: 12px; color: var(--ok); font-weight: 600; }
 
 /* Row layout for each key, used instead of a table: a key has a name, a
    secondary line, and a few figures, which reads better as a list. */
@@ -560,6 +564,43 @@ td .muted { color: var(--text-tertiary); }
 .key-prefix { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px; }
 .key-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 .empty-state { padding: 20px 18px; font-size: 13px; color: var(--text-secondary); }
+
+/* ---- request log filters ---- */
+.filters { padding: 12px 18px; display: flex; flex-direction: column; gap: 10px; }
+.filter-input { max-width: 420px; }
+.filters-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.filters-spacer { flex: 1; }
+/* Filter chips are toggle buttons, not pills: squared, with a border that
+   carries their pressed state rather than a filled capsule. */
+.chip {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.filter-count {
+  padding: 8px 18px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--divider);
+}
+/* Second line inside a cell: the diagnostics that used to be dropped. */
+.cell-sub { font-size: 11.5px; color: var(--text-tertiary); margin-top: 2px; }
+.detail-error { color: var(--warn); font-weight: 600; }
+.account-error { color: var(--error); }
+/* Keyboard focus ring for row stepping (n / p), distinct from text selection. */
+.row-focused { background: var(--row-hover); outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>
 </head>
 <body>
@@ -571,11 +612,18 @@ td .muted { color: var(--text-tertiary); }
   'use strict';
 
   var KEY_STORAGE = 'wkb2api-admin-key';
+  /**
+   * Mirrors MAX_LOG in src/observability/metrics.ts. The panel states it in
+   * prose so an operator knows why a busy gateway's totals exceed the rows
+   * listed below them; if the two ever disagree the copy becomes misleading.
+   */
+  var MAX_LOG = 200;
   var state = {
     key: null,
     overview: null,
     view: 'overview',
     timer: null,
+    tick: null,
     unlockError: null,
     oauth: null,
     oauthTimer: null,
@@ -585,6 +633,11 @@ td .muted { color: var(--text-tertiary); }
     overviewPending: false,
     keys: null,
     newKey: null,
+    // Request log: cached entries plus the active filter, so typing filters the
+    // last fetch instead of issuing a request per keystroke.
+    requests: null,
+    reqFilter: '',
+    reqStatuses: [],
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -661,6 +714,7 @@ td .muted { color: var(--text-tertiary); }
     set('stat-errors', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok');
     set('stat-p95', fmtMs(s.p95_ms));
     set('stat-tokens', fmtInt(s.tokens.prompt + s.tokens.completion));
+    set('stat-retries', fmtInt(s.total_retries || 0) + (s.retry_rate ? ' · ' + fmtPct(s.retry_rate) : ''));
 
     var rows = document.querySelectorAll('[data-mkey]');
     if (rows.length !== s.per_model.length) { renderMain(); return; } // shape changed → rebuild once
@@ -672,15 +726,45 @@ td .muted { color: var(--text-tertiary); }
       var fill = row.querySelector('.bar-fill');
       var val = row.querySelector('.row-value');
       if (fill) fill.style.width = (max ? Math.round(m.count / max * 100) : 0) + '%';
-      if (val) val.textContent = fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok';
+      // Keep the failing share of the bar in step with the counts; it is drawn
+      // as a child of the fill, so it must exist before it can be sized.
+      var errBar = row.querySelector('.bar-errors');
+      if (m.errors) {
+        var pct = m.count ? Math.round(m.errors / m.count * 100) : 0;
+        if (!errBar && fill) {
+          errBar = document.createElement('span');
+          errBar.className = 'bar-errors';
+          fill.appendChild(errBar);
+        }
+        if (errBar) errBar.style.width = pct + '%';
+      } else if (errBar) {
+        errBar.remove();
+      }
+      if (val) {
+        val.innerHTML = fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok' +
+          (m.errors ? ' · <span style="color:var(--error)">' + fmtInt(m.errors) + ' err</span>' : '');
+      }
     });
   }
 
   function startTimer() {
     stopTimer();
-    state.timer = setInterval(function () { refreshOverview().catch(function () {}); }, 5000);
+    // Two cadences: the data poll stays at 5s, while the cooldown countdown is
+    // a purely local label that needs to tick every second to look alive.
+    state.timer = setInterval(function () {
+      refreshOverview().catch(function () {});
+      // Tail the log only while it is on screen, and silently so a refresh
+      // cannot interrupt someone typing into the filter.
+      if (state.view === 'requests') loadRequests(true);
+    }, 5000);
+    state.tick = setInterval(function () {
+      if (state.view === 'upstream') tickCooldowns();
+    }, 1000);
   }
-  function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+  function stopTimer() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (state.tick) { clearInterval(state.tick); state.tick = null; }
+  }
 
   // ---------- formatting ----------
   function fmtInt(n) { return (n || 0).toLocaleString(); }
@@ -704,6 +788,8 @@ td .muted { color: var(--text-tertiary); }
   function fmtStamp(ts) {
     if (ts == null) return 'never';
     var d = new Date(ts);
+    // A malformed persisted line should not print "Invalid Date" in the table.
+    if (isNaN(d.getTime())) return '-';
     var sameDay = d.toDateString() === new Date().toDateString();
     if (sameDay) return d.toLocaleTimeString(undefined, { hour12: false });
     return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -782,7 +868,7 @@ td .muted { color: var(--text-tertiary); }
 
     if (state.view === 'overview') main.innerHTML = viewOverview(d);
     else if (state.view === 'models') main.innerHTML = viewModels(d);
-    else if (state.view === 'requests') { main.innerHTML = viewRequestsShell(); loadRequests(); }
+    else if (state.view === 'requests') { main.innerHTML = viewRequestsShell(); wireRequestFilters(); loadRequests(); }
     else if (state.view === 'keys') { main.innerHTML = viewKeysShell(); loadKeys(); }
     else if (state.view === 'upstream') {
       main.innerHTML = viewUpstream(d);
@@ -803,22 +889,43 @@ td .muted { color: var(--text-tertiary); }
     var modelRows = s.per_model.length === 0
       ? '<div class="row"><div class="row-main"><div class="row-title muted" style="color:var(--text-tertiary)">No requests yet</div></div></div>'
       : s.per_model.map(function (m) {
+        // The error portion of each bar is drawn over the request bar, so a
+        // model with failures is visible as failures rather than only volume.
+        var errPct = m.count ? Math.round((m.errors || 0) / m.count * 100) : 0;
         return '<div class="row" data-mkey="' + escapeHtml(m.model) + '">' +
           '<div class="row-main"><div class="row-title">' + escapeHtml(m.model) + '</div>' +
-          '<div class="bar-track"><div class="bar-fill" style="width:' + (maxCount ? Math.round(m.count / maxCount * 100) : 0) + '%"></div></div></div>' +
-          '<div class="row-value">' + fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok</div></div>';
+          '<div class="bar-track">' +
+          '<div class="bar-fill" style="width:' + (maxCount ? Math.round(m.count / maxCount * 100) : 0) + '%">' +
+          (m.errors ? '<span class="bar-errors" style="width:' + errPct + '%"></span>' : '') +
+          '</div></div></div>' +
+          '<div class="row-value">' + fmtInt(m.count) + ' req · ' + fmtInt(m.tokens) + ' tok' +
+          (m.errors ? ' · <span style="color:var(--error)">' + fmtInt(m.errors) + ' err</span>' : '') +
+          '</div></div>';
       }).join('');
 
+    var errorCodes = (s.error_codes || []).length
+      ? s.error_codes.map(function (e) {
+        return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(e.code) + '</div></div>' +
+          '<div class="row-value">' + fmtInt(e.count) + '</div></div>';
+      }).join('')
+      : '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">No errors recorded</div></div></div>';
+
     return '<section class="section"><h2>Overview</h2>' +
-      '<p class="page-sub">Gateway up ' + fmtUptime(s.uptime_ms) + '. Data refreshes every 5 seconds.</p>' +
+      '<p class="page-sub">Gateway up ' + fmtUptime(s.uptime_ms) + '. Totals count every request since the gateway restarted; ' +
+      'the log keeps the most recent ' + MAX_LOG + '. Data refreshes every 5 seconds.</p>' +
       '<div class="stat-grid">' +
       statTile('Total requests', fmtInt(s.total_requests), '', 'stat-total') +
       statTile('Error rate', fmtPct(s.error_rate), s.error_rate > 0.05 ? 'bad' : 'ok', 'stat-errors') +
       statTile('P95 latency', fmtMs(s.p95_ms), '', 'stat-p95') +
       statTile('Token usage', fmtInt(s.tokens.prompt + s.tokens.completion), '', 'stat-tokens') +
+      statTile('Retries', fmtInt(s.total_retries || 0) + (s.retry_rate ? ' · ' + fmtPct(s.retry_rate) : ''), '', 'stat-retries') +
       '</div>' +
-      '<div class="card"><div class="card-header"><h3 class="card-title">Calls by model</h3><span class="card-note">cumulative · last 200 window</span></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Calls by model</h3>' +
+      '<span class="card-note">cumulative since restart · bar shows request volume, red is the failing share</span></div>' +
       '<div class="rows">' + modelRows + '</div></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Error codes</h3>' +
+      '<span class="card-note">cumulative since restart</span></div>' +
+      '<div class="rows">' + errorCodes + '</div></div>' +
       '</section>';
   }
 
@@ -919,6 +1026,8 @@ td .muted { color: var(--text-tertiary); }
     var host = $('#key-banner');
     if (!host) return;
     if (!state.newKey) { host.innerHTML = ''; return; }
+    // Offer the two shapes the value is actually pasted into, but only while the
+    // plaintext exists: after dismissal nothing here can honour a copy.
     host.innerHTML = '<div class="reveal">' +
       '<div class="reveal-head"><span class="reveal-title">Copy this key now</span>' +
       '<span class="pill warn">shown once</span></div>' +
@@ -926,7 +1035,26 @@ td .muted { color: var(--text-tertiary); }
       '<div class="secret-row"><code id="new-key-value">' + escapeHtml(state.newKey.key) + '</code>' +
       '<button class="btn" id="key-copy">Copy</button>' +
       '<button class="btn btn-ghost" id="key-dismiss">Dismiss</button></div>' +
+      '<div class="reveal-actions">' +
+      '<button class="btn secondary" id="key-copy-header">Copy as Authorization header</button>' +
+      '<button class="btn secondary" id="key-copy-curl">Copy as curl</button>' +
+      '<span class="reveal-saved" id="key-copied-note" role="status" aria-live="polite"></span>' +
+      '</div>' +
       '</div>';
+
+    function copyText(text, label) {
+      var note = $('#key-copied-note');
+      var show = function (ok) {
+        if (note) note.textContent = ok ? label + ' copied' : 'Copy failed. Select the key and copy it manually.';
+        setTimeout(function () { if (note) note.textContent = ''; }, 2000);
+      };
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function () { show(true); }).catch(function () { show(false); });
+      } else {
+        show(false);
+      }
+    }
+
     var copy = $('#key-copy');
     if (copy) copy.addEventListener('click', function () {
       var value = state.newKey ? state.newKey.key : '';
@@ -936,6 +1064,24 @@ td .muted { color: var(--text-tertiary); }
           setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
         }).catch(function () {});
       }
+    });
+    var header = $('#key-copy-header');
+    if (header) header.addEventListener('click', function () {
+      copyText('Authorization: Bearer ' + (state.newKey ? state.newKey.key : ''), 'Header');
+    });
+    var curl = $('#key-copy-curl');
+    if (curl) curl.addEventListener('click', function () {
+      var base = window.location.origin;
+      // Built from parts so the JSON body never needs escaped quotes nested
+      // inside the surrounding string literal.
+      var body = JSON.stringify({ model: 'wb-2', messages: [{ role: 'user', content: 'hello' }] });
+      var token = state.newKey ? state.newKey.key : '';
+      copyText(
+        'curl ' + base + '/v1/chat/completions \\\n' +
+        '  -H "Authorization: Bearer ' + token + '" \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        '  -d ' + "'" + body + "'",
+        'curl command');
     });
     var dismiss = $('#key-dismiss');
     if (dismiss) dismiss.addEventListener('click', function () { state.newKey = null; renderKeyBanner(); });
@@ -951,11 +1097,22 @@ td .muted { color: var(--text-tertiary); }
     if (!body || !state.keys) return;
 
     function figures(k) {
+      // Usage is joined server-side (the panel never sees a key hash). Absent
+      // or null means no traffic was recorded, which is reported as such rather
+      // than as a zero that would read like disuse.
+      var usage = k.usage
+        ? '<span><b>Tokens</b> ' + escapeHtml(fmtInt(k.usage.total_tokens)) + '</span>'
+        : '';
+      var recorded = k.usage
+        ? ''
+        : '<span class="muted">no recorded usage</span>';
       return '<div class="key-meta">' +
         '<span><b>Prefix</b> <code class="key-prefix">' + escapeHtml(k.prefix) + '</code></span>' +
         '<span><b>Requests</b> ' + escapeHtml(String(k.request_count)) + '</span>' +
+        usage +
         '<span><b>Last used</b> ' + escapeHtml(fmtStamp(k.last_used_at)) + '</span>' +
         '<span><b>Created</b> ' + escapeHtml(fmtStamp(k.created_at)) + '</span>' +
+        recorded +
         '</div>';
     }
 
@@ -981,7 +1138,13 @@ td .muted { color: var(--text-tertiary); }
       '<div class="row-main">' +
         '<div class="row-title">' + escapeHtml(state.keys.bootstrap_key.name) + ' <span class="badge badge-admin">admin</span></div>' +
         '<div class="row-sub">' + escapeHtml(state.keys.bootstrap_key.note) + '</div>' +
-        '<div class="key-meta"><span><b>Source</b> environment variable</span><span><b>Revoke</b> not possible from here</span></div>' +
+        '<div class="key-meta">' +
+          '<span><b>Source</b> environment variable</span>' +
+          '<span><b>Revoke</b> not possible from here</span>' +
+          (state.keys.bootstrap_key.usage_note
+            ? '<span class="muted">' + escapeHtml(state.keys.bootstrap_key.usage_note) + '</span>'
+            : '') +
+        '</div>' +
       '</div>' +
       '</div>';
 
@@ -1052,50 +1215,280 @@ td .muted { color: var(--text-tertiary); }
   function viewRequestsShell() {
     return '<section class="section">' +
       '<div class="page-head"><div><h2>Requests</h2>' +
-      '<p class="page-sub">Last ' + 200 + ' requests. This buffer is cleared on restart.</p></div></div>' +
-      '<div class="card" id="req-card"><div id="req-body"><div class="empty-state">Loading</div></div></div></section>';
+      '<p class="page-sub">Newest first. The in-memory buffer holds ' + MAX_LOG + ' entries and is cleared on restart.</p></div></div>' +
+      '<div class="card"><div class="filters">' +
+      '<input class="input filter-input" id="req-filter" type="search" placeholder="Filter by path, model, status or error code" autocomplete="off" aria-label="Filter requests">' +
+      '<div class="filters-row">' +
+      '<button class="chip" data-status="ok" aria-pressed="false">2xx</button>' +
+      '<button class="chip" data-status="client" aria-pressed="false">4xx</button>' +
+      '<button class="chip" data-status="server" aria-pressed="false">5xx</button>' +
+      '<button class="chip" data-status="retried" aria-pressed="false">Retried</button>' +
+      '<button class="chip" data-status="failed" aria-pressed="false">Errors only</button>' +
+      '<span class="filters-spacer"></span>' +
+      '<button class="btn btn-ghost" id="req-clear" hidden>Clear filter</button>' +
+      '</div>' +
+      '</div></div>' +
+      '<div class="card" id="req-card"><div id="req-body"><div class="empty-state">Loading</div></div></div>' +
+      '<div class="card"><div class="card-header"><h3 class="card-title">Persisted history</h3>' +
+      '<span class="card-note" id="history-note">Disabled until loaded</span></div>' +
+      '<div class="rows"><div class="row"><div class="row-main"><div class="row-sub">The buffer above is lost on restart. Load the on-disk log to see requests recorded before the last restart.</div></div>' +
+      '<button class="btn secondary" id="history-load">Load history</button></div></div>' +
+      '<div id="history-body"></div>' +
+      '</div>' +
+      '</section>';
   }
 
-  function loadRequests() {
-    api('requests').then(function (d) {
-      var body = $('#req-body');
-      if (!body) return;
-      if (!d.recent || d.recent.length === 0) {
-        body.innerHTML = '<div class="empty-state">No requests recorded yet.</div>';
-        return;
-      }
-      var trs = d.recent.map(function (r) {
-        var st = '<span class="muted">' + r.status + '</span>';
-        if (r.status >= 500) st = '<span style="color:var(--error);font-weight:600">' + r.status + '</span>';
-        else if (r.status >= 400) st = '<span style="color:var(--warn);font-weight:600">' + r.status + '</span>';
-        else if (r.status < 300) st = '<span style="color:var(--ok);font-weight:600">' + r.status + '</span>';
-        var tok = (r.prompt_tokens || r.completion_tokens) ? (r.prompt_tokens || 0) + ' / ' + (r.completion_tokens || 0) : '<span class="muted">-</span>';
-        // data-label feeds the stacked layout on narrow screens, where the
-        // header row is hidden and each cell carries its own heading.
-        return '<tr><td data-label="Time">' + fmtTime(r.time) + '</td><td class="path" data-label="Request">' + escapeHtml(r.method + ' ' + r.path) +
-          (r.model ? ' <span class="muted">· ' + escapeHtml(r.model) + (r.stream ? ' · stream' : '') + '</span>' : '') + '</td>' +
-          '<td data-label="Status">' + st + '</td><td data-label="tok in/out">' + tok + '</td><td data-label="Duration">' + fmtMs(r.duration_ms) + '</td></tr>';
-      }).join('');
-      // Write into #req-body, not the card: overwriting the card would destroy
-      // the #req-body element itself and break every later refresh.
-      body.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Time</th><th>Request</th><th>Status</th><th>tok in/out</th><th>Duration</th></tr></thead><tbody>' + trs + '</tbody></table></div>';
+  /** Status colouring shared by the in-memory table and the persisted list. */
+  function statusCell(status) {
+    if (status >= 500) return '<span style="color:var(--error);font-weight:600">' + status + '</span>';
+    if (status >= 400) return '<span style="color:var(--warn);font-weight:600">' + status + '</span>';
+    if (status < 300) return '<span style="color:var(--ok);font-weight:600">' + status + '</span>';
+    return '<span class="muted">' + status + '</span>';
+  }
+
+  /**
+   * The extra detail a failed or retried request carries. Every field here is
+   * already recorded by the gateway; the panel previously dropped them, which
+   * left a bare status number as the only clue to what went wrong.
+   */
+  function requestDetail(r) {
+    var parts = [];
+    if (r.error_class || r.error_code) {
+      parts.push('<span class="detail-error">' + escapeHtml([r.error_class, r.error_code].filter(Boolean).join(' · ')) + '</span>');
+    }
+    if (r.retries > 0) parts.push(escapeHtml(r.retries === 1 ? 'after 1 retry' : 'after ' + r.retries + ' retries'));
+    if (r.account) parts.push('via ' + escapeHtml(r.account));
+    return parts.length ? '<div class="cell-sub">' + parts.join(' · ') + '</div>' : '';
+  }
+
+  function requestRows(entries) {
+    return entries.map(function (r) {
+      // data-label feeds the stacked layout on narrow screens, where the header
+      // row is hidden and each cell carries its own heading.
+      return '<tr><td data-label="Time">' + fmtTime(r.time) + '</td>' +
+        '<td class="path" data-label="Request">' + escapeHtml(r.method + ' ' + r.path) +
+        (r.model ? ' <span class="muted">· ' + escapeHtml(r.model) + (r.stream ? ' · stream' : '') + '</span>' : '') + '</td>' +
+        '<td data-label="Status">' + statusCell(r.status) + requestDetail(r) + '</td>' +
+        '<td data-label="tok in/out">' + fmtTokens(r) + '</td>' +
+        '<td data-label="Duration">' + fmtMs(r.duration_ms) + '</td></tr>';
+    }).join('');
+  }
+
+  function fmtTokens(r) {
+    var has = r.prompt_tokens || r.completion_tokens;
+    return has ? (r.prompt_tokens || 0) + ' / ' + (r.completion_tokens || 0) : '<span class="muted">-</span>';
+  }
+
+  /** Does one entry survive the current filter text and status chips? */
+  function matchesFilter(r, text, statuses) {
+    if (statuses.length) {
+      var group = r.status >= 500 ? 'server' : r.status >= 400 ? 'client' : r.status < 300 ? 'ok' : 'other';
+      var ok = statuses.indexOf(group) !== -1
+        || (statuses.indexOf('retried') !== -1 && r.retries > 0)
+        || (statuses.indexOf('failed') !== -1 && r.status >= 400);
+      if (!ok) return false;
+    }
+    if (!text) return true;
+    var hay = [r.method, r.path, r.model, r.status, r.error_code, r.error_class, r.account]
+      .filter(function (v) { return v != null && v !== ''; }).join(' ').toLowerCase();
+    return hay.indexOf(text.toLowerCase()) !== -1;
+  }
+
+  /**
+   * Re-render the table from the cached entries.
+   *
+   * Filtering happens here rather than in the fetch so typing never triggers a
+   * request, and so the same render path serves both the first load and every
+   * later refresh.
+   */
+  function renderRequests() {
+    var body = $('#req-body');
+    if (!body) return;
+    var entries = state.requests;
+    if (!entries) { body.innerHTML = '<div class="empty-state">Loading</div>'; return; }
+    if (!entries.length) {
+      body.innerHTML = '<div class="empty-state">No requests recorded yet.</div>';
+      return;
+    }
+    var text = state.reqFilter.trim();
+    var statuses = state.reqStatuses;
+    var shown = entries.filter(function (r) { return matchesFilter(r, text, statuses); });
+    var clear = $('#req-clear');
+    if (clear) clear.hidden = !text && statuses.length === 0;
+    if (!shown.length) {
+      // Distinct from "nothing recorded": the log has entries, the filter
+      // excludes them, and saying so avoids looking like a broken page.
+      body.innerHTML = '<div class="empty-state">No requests match this filter. ' +
+        '<button class="btn btn-ghost" id="req-clear-2">Clear filter</button></div>';
+      var inner = $('#req-clear-2');
+      if (inner) inner.addEventListener('click', clearRequestFilter);
+      return;
+    }
+    var count = '<div class="filter-count">' + shown.length + ' of ' + entries.length + ' shown</div>';
+    // Write into #req-body, not the card: overwriting the card would destroy
+    // the #req-body element itself and break every later refresh.
+    body.innerHTML = count + '<div class="table-wrap"><table><thead><tr>' +
+      '<th>Time</th><th>Request</th><th>Status</th><th>tok in/out</th><th>Duration</th>' +
+      '</tr></thead><tbody>' + requestRows(shown) + '</tbody></table></div>';
+  }
+
+  function clearRequestFilter() {
+    state.reqFilter = '';
+    state.reqStatuses = [];
+    var input = $('#req-filter');
+    if (input) input.value = '';
+    var chips = document.querySelectorAll('.chip[data-status]');
+    Array.prototype.forEach.call(chips, function (c) { c.setAttribute('aria-pressed', 'false'); c.classList.remove('active'); });
+    renderRequests();
+  }
+
+  function loadRequests(silent) {
+    return api('requests').then(function (d) {
+      state.requests = d.recent || [];
+      // A live refresh must not yank text out from under someone mid-type.
+      if (silent && document.activeElement && document.activeElement.id === 'req-filter') return;
+      renderRequests();
     }).catch(function () {});
   }
 
-  function viewUpstream(d) {
-    var c = d.credential;
+  function wireRequestFilters() {
+    var input = $('#req-filter');
+    if (input) {
+      input.value = state.reqFilter;
+      input.addEventListener('input', function () { state.reqFilter = input.value; renderRequests(); });
+    }
+    var clear = $('#req-clear');
+    if (clear) clear.addEventListener('click', clearRequestFilter);
+    Array.prototype.forEach.call(document.querySelectorAll('.chip[data-status]'), function (chip) {
+      var key = chip.getAttribute('data-status');
+      var on = state.reqStatuses.indexOf(key) !== -1;
+      chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if (on) chip.classList.add('active');
+      chip.addEventListener('click', function () {
+        var at = state.reqStatuses.indexOf(key);
+        if (at === -1) state.reqStatuses.push(key); else state.reqStatuses.splice(at, 1);
+        chip.setAttribute('aria-pressed', at === -1 ? 'true' : 'false');
+        chip.classList.toggle('active', at === -1);
+        renderRequests();
+      });
+    });
+    var load = $('#history-load');
+    if (load) load.addEventListener('click', loadHistory);
+  }
+
+  /**
+   * The durable log. It is deliberately a separate, explicit action rather than
+   * part of the page load: on the file backend, or with persistence switched
+   * off, the endpoint answers 503, and that is a normal state the operator
+   * should be told about plainly rather than shown an error card for.
+   */
+  function loadHistory() {
+    var host = $('#history-body');
+    var note = $('#history-note');
+    if (!host) return;
+    host.innerHTML = '<div class="empty-state">Loading history</div>';
+    api('telemetry?limit=200&kind=request').then(function (d) {
+      if (note) note.textContent = d.count + ' event(s) from the ' + d.backend + ' backend' + (d.path ? ' at ' + d.path : '');
+      if (!d.events || !d.events.length) {
+        host.innerHTML = '<div class="empty-state">The persisted log is empty.</div>';
+        return;
+      }
+      // Newest first, matching the live table above. Events are tagged by kind:
+      // request records mirror the live rows, pool events record account
+      // changes so a restart sits in the same timeline as its cause.
+      var entries = d.events.slice().reverse();
+      host.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Time</th><th>Kind</th><th>Detail</th></tr></thead><tbody>' +
+        entries.map(function (e) { return historyRow(e); }).join('') + '</tbody></table></div>';
+    }).catch(function (err) {
+      if (note) note.textContent = 'Not available';
+      host.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Could not load the persisted log.') + '</div>';
+    });
+  }
+
+  function historyRow(e) {
+    if (!e || typeof e !== 'object') {
+      return '<tr><td data-label="Time">-</td><td data-label="Kind">unknown</td><td data-label="Detail">-</td></tr>';
+    }
+    if (e.kind === 'pool') {
+      var p = e.record || {};
+      var who = p.label ? p.label + ' ' : '';
+      return '<tr><td data-label="Time">' + fmtStamp(Date.parse(p.time) || null) + '</td>' +
+        '<td data-label="Kind"><span class="badge">pool</span></td>' +
+        '<td data-label="Detail">' + escapeHtml(who + (p.event || '') + (p.detail ? ' · ' + p.detail : '')) + '</td></tr>';
+    }
+    var r = (e.record || {});
+    return '<tr><td data-label="Time">' + fmtStamp(Date.parse(r.time) || null) + '</td>' +
+      '<td data-label="Kind"><span class="badge">request</span></td>' +
+      '<td class="path" data-label="Detail">' + escapeHtml(r.method + ' ' + r.path) +
+      (r.model ? ' <span class="muted">· ' + escapeHtml(r.model) + '</span>' : '') +
+      ' ' + statusCell(r.status) + requestDetail(r) + '</td></tr>';
+  }
+
+  /** The health record matching a pool label, when the panel has one. */
+  function healthFor(health, label) {
+    if (!health || !health.accounts) return null;
+    for (var i = 0; i < health.accounts.length; i++) {
+      if (health.accounts[i].label === label) return health.accounts[i];
+    }
+    return null;
+  }
+
+  /**
+   * One account row. The availability tag alone could not explain itself: an
+   * account cooling down from a 401 and one that simply has not been used
+   * looked identical, so the recorded error and the remaining cooldown are
+   * shown alongside it.
+   */
+  function accountRow(a, h) {
+    var tag = 'available';
+    var tone = 'ok';
+    if (h && h.state === 'reauth_required') { tag = 'sign-in required'; tone = 'error'; }
+    else if (h && h.state === 'cooling_down') { tag = 'cooling down'; tone = 'warn'; }
+    else if (!a.ok) { tag = 'unavailable'; tone = 'warn'; }
+
+    var detail = '<div class="row-sub">' + escapeHtml(a.detail) + '</div>';
+    if (h && (h.last_error || h.failures)) {
+      var bits = [];
+      if (h.failures) bits.push(h.failures + (h.failures === 1 ? ' failure' : ' failures'));
+      if (h.last_error) bits.push(h.last_error);
+      if (h.last_failure_at) bits.push('last at ' + fmtStamp(h.last_failure_at));
+      detail += '<div class="row-sub account-error">' + escapeHtml(bits.join(' · ')) + '</div>';
+    }
+    // Counted down client-side from the server's remainder, then re-synced on
+    // each poll. Rendered only when the server actually reports a cooldown, so
+    // it can never show a countdown for an account that is not cooling down.
+    if (h && h.cooldown_remaining_ms) {
+      detail += '<div class="row-sub" data-cooldown-until="' + (Date.now() + h.cooldown_remaining_ms) + '">' +
+        'retrying in ' + Math.ceil(h.cooldown_remaining_ms / 1000) + 's</div>';
+    }
+    return '<div class="row">' +
+      '<div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div>' +
+      detail + '</div>' +
+      '<span class="pill ' + tone + '">' + tag + '</span>' +
+      '<button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '" style="padding:4px 10px;font-size:12px">Remove</button>' +
+      '</div>';
+  }
+
+  /** Tick the countdowns between polls so they do not sit frozen for 5s. */
+  function tickCooldowns() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-cooldown-until]'), function (el) {
+      var until = Number(el.getAttribute('data-cooldown-until'));
+      var left = until - Date.now();
+      if (left <= 0) { el.textContent = 'cooldown elapsed, retrying on next request'; return; }
+      el.textContent = 'retrying in ' + Math.ceil(left / 1000) + 's';
+    });
+  }
+
+  function viewUpstream(d) {    var c = d.credential;
     var u = d.upstream;
     var pool = d.pool || { size: 0, strategy: 'round-robin', accounts: [] };
     var stratName = pool.strategy === 'random' ? 'random' : 'round-robin';
+    // Declared before the rows are built: accountRow reads it for cooldown and
+    // failure detail.
+    var health = pool.health;
 
-    var acctRows = pool.accounts.map(function (a) {
-      return '<div class="row">' +
-        '<div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div>' +
-        '<div class="row-sub">' + escapeHtml(a.detail) + '</div></div>' +
-        '<span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? 'available' : 'cooling down') + '</span>' +
-        '<button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '" style="padding:4px 10px;font-size:12px">Remove</button>' +
-        '</div>';
-    }).join('');
+    var acctRows = pool.accounts.map(function (a) { return accountRow(a, healthFor(health, a.label)); }).join('');
     if (pool.size === 0) {
       acctRows = '<div class="row"><div class="row-main"><div class="row-title" style="color:var(--text-tertiary)">Account pool is empty. Falling back to the single account in the local credential file.</div></div></div>';
     }
@@ -1103,7 +1496,6 @@ td .muted { color: var(--text-tertiary); }
     // Pool readiness banner. "Size > 0" is not the same as "usable": every
     // account can be cooling down or need a fresh web login, and the previous
     // panel showed a green dot in that state.
-    var health = pool.health;
     var healthBanner = '';
     if (health) {
       var tone = health.ready ? (health.state === 'degraded' ? 'warn' : 'ok') : 'error';
@@ -1176,13 +1568,69 @@ td .muted { color: var(--text-tertiary); }
     if (rf) rf.addEventListener('click', function () { refreshOverview().catch(function () {}); });
   }
 
+  /**
+   * Keyboard shortcuts for the two things an operator does most: jump to the
+   * key filter, and step through keys.
+   *
+   * Every shortcut is suppressed while focus is in a text field or a form
+   * control that consumes the keystroke, so typing a key name can never be
+   * mistaken for a command.
+   */
+  function isTypingTarget(el) {
+    if (!el) return false;
+    var tag = (el.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+    return el.isContentEditable === true;
+  }
+
+  function wireShortcuts() {
+    document.addEventListener('keydown', function (e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var typing = isTypingTarget(document.activeElement);
+
+      if (e.key === 'Escape') {
+        if (state.view === 'requests' && (state.reqFilter || state.reqStatuses.length)) {
+          clearRequestFilter();
+          e.preventDefault();
+        }
+        return;
+      }
+      // "/" focuses the filter from anywhere outside a field. preventDefault
+      // stops the browser's quick-find from opening instead.
+      if (e.key === '/' && !typing) {
+        var input = $('#req-filter');
+        if (input) { input.focus(); e.preventDefault(); }
+        return;
+      }
+      if (typing) return;
+
+      // n / p step a highlight through the visible rows of whichever list is on
+      // screen, so a long log can be walked without reaching for the mouse.
+      if (e.key === 'n' || e.key === 'p') {
+        var rows = document.querySelectorAll('#req-body tbody tr, #key-body .row, #acct-rows .row');
+        if (!rows.length) return;
+        var current = document.querySelector('.row-focused');
+        var at = current ? Array.prototype.indexOf.call(rows, current) : -1;
+        var next = e.key === 'n' ? at + 1 : at - 1;
+        if (next < 0) next = rows.length - 1;
+        if (next >= rows.length) next = 0;
+        if (current) current.classList.remove('row-focused');
+        rows[next].classList.add('row-focused');
+        rows[next].scrollIntoView({ block: 'nearest' });
+        e.preventDefault();
+      }
+    });
+  }
+
   function patchAccountPool(d) {
     var rows = $('#acct-rows');
     if (!rows) return;
     var accounts = d.pool.accounts;
-    var html = accounts.map(function (a) {
-      return '<div class="row"><div class="row-main"><div class="row-title">' + escapeHtml(a.label) + (a.note ? ' · ' + escapeHtml(a.note) : '') + '</div><div class="row-sub">' + escapeHtml(a.detail) + '</div></div><span class="pill ' + (a.ok ? 'ok' : 'warn') + '">' + (a.ok ? 'available' : 'recovering') + '</span><button class="btn secondary acct-remove" data-label="' + escapeHtml(a.label) + '">Remove</button></div>';
-    }).join('') || '<div class="row"><div class="row-title">Account pool is empty. Use the button below to sign in.</div></div>';
+    var health = d.pool.health;
+    // Same renderer as the first paint, so a refreshed row carries the same
+    // failure and cooldown detail rather than reverting to a bare tag.
+    var html = accounts.map(function (a) { return accountRow(a, healthFor(health, a.label)); }).join('')
+      || '<div class="row"><div class="row-title">Account pool is empty. Use the button below to sign in.</div></div>';
     if (rows.dataset.snapshot !== html) { rows.innerHTML = html; rows.dataset.snapshot = html; }
     document.querySelectorAll('[data-strategy]').forEach(function (button) {
       var selected = button.dataset.strategy === d.pool.strategy;
@@ -1290,6 +1738,7 @@ td .muted { color: var(--text-tertiary); }
   }
 
   // ---------- boot ----------
+  wireShortcuts();
   var saved = null;
   try { saved = localStorage.getItem(KEY_STORAGE); } catch (e) {}
   if (saved) {

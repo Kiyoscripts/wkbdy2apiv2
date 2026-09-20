@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { isApiKeyValid } from '../security/downstream-auth.js';
+import { isApiKeyValid, keyFingerprintFromHash } from '../security/downstream-auth.js';
 import { openAiError } from '../openai/errors.js';
 import type { ExposedModel } from '../workbuddy/model-catalog.js';
 import type { MetricsCollector } from '../observability/metrics.js';
@@ -295,17 +295,49 @@ export function adminRoutes(app: FastifyInstance, opts: AdminOpts): void {
    * revoked and reissued. The list response says so explicitly rather than
    * leaving an operator to wonder why no "reveal" button exists.
    */
-  app.get('/admin/api/keys', async () => ({
-    keys: opts.apiKeys.list().map((record) => ({ ...record, hash: undefined, hashed: true })),
-    count: opts.apiKeys.size(),
-    bootstrap_key: {
-      id: 'env',
-      name: 'bootstrap key (WKB2API_API_KEY)',
-      admin: true,
-      revocable: false,
-      note: 'Always valid and always admin. Cannot be deleted through the panel.',
-    },
-  }));
+  app.get('/admin/api/keys', async () => {
+    // Usage is attributed to a key by matching the fingerprint the metrics
+    // collector recorded against the key's stored hash. That join has to happen
+    // here rather than in the browser: the response strips `hash`, so the panel
+    // has nothing to match on, and sending the hash to make it possible would
+    // undo the reason only hashes are stored.
+    const usageByFingerprint = new Map(
+      opts.metrics.snapshot().per_key.map((bucket) => [bucket.key_id, bucket]),
+    );
+    return {
+      keys: opts.apiKeys.list().map((record) => {
+        const bucket = usageByFingerprint.get(keyFingerprintFromHash(record.hash) ?? '');
+        return {
+          ...record,
+          hash: undefined,
+          hashed: true,
+          // `null` rather than zeros when nothing was recorded, so the panel can
+          // tell "no traffic yet" apart from "traffic that used no tokens".
+          usage: bucket
+            ? {
+                requests: bucket.requests,
+                prompt_tokens: bucket.prompt_tokens,
+                completion_tokens: bucket.completion_tokens,
+                total_tokens: bucket.total_tokens,
+              }
+            : null,
+        };
+      }),
+      count: opts.apiKeys.size(),
+      bootstrap_key: {
+        id: 'env',
+        name: 'bootstrap key (WKB2API_API_KEY)',
+        admin: true,
+        revocable: false,
+        note: 'Always valid and always admin. Cannot be deleted through the panel.',
+        // The env key is not a stored record and has no hash, so its traffic
+        // cannot be attributed. Reported explicitly so the panel shows
+        // "not attributable" instead of a zero that looks like disuse.
+        usage: null,
+        usage_note: 'not attributable: the environment key has no stored record',
+      },
+    };
+  });
 
   const createKeySchema = z.object({
     name: z.string().min(1).max(64),

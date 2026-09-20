@@ -52,7 +52,7 @@ export type MetricsSnapshot = {
   tokens: { prompt: number; completion: number };
   total_retries: number;
   retry_rate: number;
-  per_model: Array<{ model: string; count: number; tokens: number }>;
+  per_model: Array<{ model: string; count: number; tokens: number; errors: number }>;
   per_key: Array<UsageBucket & { key_id: string }>;
   per_account: Array<UsageBucket & { account: string }>;
   /** Counts of accepted-but-dropped fields, keyed by field name. */
@@ -72,7 +72,7 @@ export class MetricsCollector {
   private startedAt = Date.now();
 
   /** Per-model counters keyed by model id. */
-  private perModel = new Map<string, { count: number; tokens: number }>();
+  private perModel = new Map<string, { count: number; tokens: number; errors: number }>();
   /** Per-key usage, keyed by the fingerprint the route supplies (never a key). */
   private perKey = new Map<string, UsageBucket>();
   /** Per-account usage, keyed by pool label. */
@@ -115,9 +115,12 @@ export class MetricsCollector {
     if (full.prompt_tokens) this.totalTokens.prompt += full.prompt_tokens;
     if (full.completion_tokens) this.totalTokens.completion += full.completion_tokens;
     if (full.model) {
-      const agg = this.perModel.get(full.model) ?? { count: 0, tokens: 0 };
+      const agg = this.perModel.get(full.model) ?? { count: 0, tokens: 0, errors: 0 };
       agg.count += 1;
       agg.tokens += (full.prompt_tokens ?? 0) + (full.completion_tokens ?? 0);
+      // Tracked per model so the panel can show where failures concentrate
+      // rather than only how much traffic each model carried.
+      if (full.status >= 400) agg.errors += 1;
       this.perModel.set(full.model, agg);
     }
     if (full.key_id) {

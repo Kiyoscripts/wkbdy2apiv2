@@ -25,6 +25,21 @@ export function keyFingerprint(key: string | undefined): string | undefined {
   return 'key_' + createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
+/**
+ * The same fingerprint, derived from a stored key hash instead of the key.
+ *
+ * A key record keeps the full SHA-256 (`hashApiKey`), and telemetry keeps the
+ * truncated, prefixed form (`keyFingerprint`), so usage can be attributed to a
+ * key by prefixing the record's hash. Doing it here keeps the two definitions
+ * adjacent: if the fingerprint format ever changes, this is the one other place
+ * that must change with it. Callers use this instead of slicing a hash inline,
+ * and it stays server-side — the hash itself is never sent to the panel.
+ */
+export function keyFingerprintFromHash(hash: string | undefined): string | undefined {
+  if (!hash) return undefined;
+  return 'key_' + hash.slice(0, 16);
+}
+
 export type ApiKeyHeaders = {
   authorization?: string | string[];
   'x-api-key'?: string | string[];

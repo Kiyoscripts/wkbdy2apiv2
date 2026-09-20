@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/app.js';
 import { ApiKeyRegistry } from '../src/security/api-keys.js';
+import { keyFingerprint } from '../src/security/downstream-auth.js';
 import { createMetrics } from '../src/observability/metrics.js';
 import { CredentialPool } from '../src/workbuddy/credential-pool.js';
 import type { WorkBuddyClient } from '../src/workbuddy/client.js';
@@ -25,7 +26,7 @@ import type { ExposedModel } from '../src/workbuddy/model-catalog.js';
 const ADMIN_KEY = 'admin-key-0123456789abcdef';
 const CLIENT_KEY = 'client-key-0123456789abcdef';
 
-type Harness = { app: FastifyInstance; registry: ApiKeyRegistry; dir: string; persisted: () => Promise<unknown> };
+type Harness = { app: FastifyInstance; registry: ApiKeyRegistry; dir: string; metrics: ReturnType<typeof createMetrics>; persisted: () => Promise<unknown> };
 
 async function makeHarness(): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), 'wkb-keys-'));
@@ -44,6 +45,7 @@ async function makeHarness(): Promise<Harness> {
     await writeFile(join(dir, 'keys.json'), JSON.stringify({ version: 1, keys: registry.list() }), 'utf8');
   };
 
+  const metrics = createMetrics();
   const app = buildApp({
     apiKey: ADMIN_KEY,
     apiKeys: registry,
@@ -51,7 +53,7 @@ async function makeHarness(): Promise<Harness> {
     models: [] as ExposedModel[],
     client,
     pool,
-    metrics: createMetrics(),
+    metrics,
     upstreamUrl: 'https://mock.invalid/v2/chat/completions',
     upstreamUa: 'test/1',
     startedAt: Date.now(),
@@ -62,6 +64,7 @@ async function makeHarness(): Promise<Harness> {
     app,
     registry,
     dir,
+    metrics,
     persisted: async () => JSON.parse(await readFile(join(dir, 'keys.json'), 'utf8')),
   };
 }
@@ -338,5 +341,82 @@ describe('admin API key management', () => {
     const record = h.registry.get(id);
     expect(record?.request_count).toBe(3);
     expect(record?.last_used_at).toBeTruthy();
+  });
+});
+
+/**
+ * Per-key usage attribution.
+ *
+ * Usage is recorded against a truncated fingerprint of the key, while the
+ * registry stores a full SHA-256. Those are joinable, but only on the server:
+ * the list response deliberately strips `hash`, and sending it so the browser
+ * could do the join would undo the reason only hashes are stored. These tests
+ * pin the join, the null case, and the fact that nothing leaks.
+ */
+describe('per-key usage attribution', () => {
+  let h: Harness;
+
+  beforeEach(async () => { h = await makeHarness(); });
+  afterEach(async () => {
+    await h.app.close();
+    await rm(h.dir, { recursive: true, force: true });
+  });
+
+  const usageOf = (body: { keys: Array<Record<string, unknown>> }, name: string) =>
+    body.keys.find((k) => k.name === name)?.usage;
+
+  it('attributes recorded traffic to the key that caused it', async () => {
+    // Record against the fingerprint a real request would produce.
+    h.metrics.record({
+      method: 'POST', path: '/v1/chat/completions', status: 200, stream: false,
+      duration_ms: 5, model: 'wb-2', prompt_tokens: 100, completion_tokens: 250,
+      key_id: keyFingerprint(CLIENT_KEY),
+    });
+
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/keys', headers: auth(ADMIN_KEY) });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { keys: Array<Record<string, unknown>> };
+    expect(usageOf(body, 'client')).toEqual({
+      requests: 1, prompt_tokens: 100, completion_tokens: 250, total_tokens: 350,
+    });
+  });
+
+  it('reports no usage as null rather than as zeros', async () => {
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/keys', headers: auth(ADMIN_KEY) });
+    const body = res.json() as { keys: Array<Record<string, unknown>> };
+    // null distinguishes "never used" from "used but spent no tokens".
+    expect(usageOf(body, 'client')).toBeNull();
+  });
+
+  it('does not attribute another key\u2019s traffic', async () => {
+    h.metrics.record({
+      method: 'POST', path: '/v1/chat/completions', status: 200, stream: false,
+      duration_ms: 5, prompt_tokens: 5, completion_tokens: 5,
+      key_id: keyFingerprint('some-other-key-entirely'),
+    });
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/keys', headers: auth(ADMIN_KEY) });
+    const body = res.json() as { keys: Array<Record<string, unknown>> };
+    expect(usageOf(body, 'client')).toBeNull();
+  });
+
+  it('explains that the environment key cannot be attributed', async () => {
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/keys', headers: auth(ADMIN_KEY) });
+    const body = res.json() as { bootstrap_key: { usage: unknown; usage_note?: string } };
+    expect(body.bootstrap_key.usage).toBeNull();
+    expect(body.bootstrap_key.usage_note).toContain('not attributable');
+  });
+
+  it('still never returns a hash or plaintext alongside the usage field', async () => {
+    h.metrics.record({
+      method: 'POST', path: '/v1/chat/completions', status: 200, stream: false,
+      duration_ms: 5, key_id: keyFingerprint(CLIENT_KEY),
+    });
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/keys', headers: auth(ADMIN_KEY) });
+    const raw = JSON.stringify(res.json());
+    // The usage join must not have leaked what it joined on.
+    expect(raw).not.toContain(CLIENT_KEY);
+    expect(raw).not.toContain(ADMIN_KEY);
+    const body = res.json() as { keys: Array<Record<string, unknown>> };
+    for (const key of body.keys) expect(key.hash).toBeUndefined();
   });
 });

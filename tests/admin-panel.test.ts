@@ -1,6 +1,7 @@
 import { Window, type HTMLInputElement, type HTMLButtonElement, type HTMLElement } from 'happy-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminPanelHtml } from '../src/routes/admin-html.js';
+import { createMetrics } from '../src/observability/metrics.js';
 
 const windows: Window[] = [];
 afterEach(async () => { await Promise.all(windows.splice(0).map((w) => w.happyDOM.close())); });
@@ -222,5 +223,265 @@ describe('request log panel', () => {
     (w.document.querySelector('[data-view="overview"]') as unknown as HTMLButtonElement).click();
     goRequests();
     await vi.waitFor(() => expect(w.document.querySelector('#req-body table')).toBeTruthy());
+  });
+});
+
+/**
+ * The panel is a template literal holding a whole program, so a stray quote
+ * produces valid TypeScript that is broken JavaScript. Nothing else catches it
+ * until a browser silently fails to boot the page, so parse the emitted script
+ * here.
+ */
+describe('embedded panel script', () => {
+  it('is syntactically valid JavaScript when emitted', () => {
+    const html = adminPanelHtml();
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it('never loads an external asset, so the console works offline', () => {
+    const html = adminPanelHtml();
+    // The favicon is a data URI; nothing may point at a CDN or a local file.
+    expect(html).not.toMatch(/<link[^>]+href="https?:/);
+    expect(html).not.toMatch(/<img/i);
+  });
+});
+
+/**
+ * Failure detail is the point of the log. The gateway records error class,
+ * retry count and the serving account for every request; the panel used to
+ * render none of them, leaving a bare status code as the only clue.
+ */
+describe('request log detail and filtering', () => {
+  const entries = [
+    { time: Date.now(), request_id: 'r1', method: 'POST', path: '/v1/chat/completions', status: 200, model: 'wb-2', stream: true, duration_ms: 412, prompt_tokens: 10, completion_tokens: 20, attempts: 1, retries: 0, account: '#1' },
+    { time: Date.now(), request_id: 'r2', method: 'POST', path: '/v1/chat/completions', status: 502, model: 'wb-2', stream: false, duration_ms: 900, attempts: 2, retries: 1, error_code: 'upstream_error', error_class: 'upstream_error', account: '#2' },
+    { time: Date.now(), request_id: 'r3', method: 'GET', path: '/v1/models', status: 401, stream: false, duration_ms: 3, attempts: 1, retries: 0, error_code: 'invalid_api_key', error_class: 'auth_error' },
+  ];
+
+  async function logPanel() {
+    const w = new Window({ url: 'http://127.0.0.1:8787/admin' });
+    windows.push(w);
+    w.fetch = (async (path: string) => {
+      const body = path.endsWith('/requests') ? { recent: entries } : { ...overview, credential: { ok: true, source: 'pool', detail: '' } };
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }) as never;
+    w.document.write(adminPanelHtml());
+    w.eval(w.document.querySelector('script')!.textContent!);
+    (w.document.querySelector('#key-input') as unknown as HTMLInputElement).value = 'test-only-admin-key';
+    (w.document.querySelector('#key-submit') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#main h2')?.textContent).toBe('Overview'));
+    (w.document.querySelector('[data-view="requests"]') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#req-body table')).toBeTruthy());
+    return w;
+  }
+
+  const text = (w: Window) => w.document.querySelector('#req-body')?.textContent ?? '';
+
+  it('shows the recorded error class, retry count and serving account', async () => {
+    const w = await logPanel();
+    const body = text(w);
+    expect(body).toContain('upstream_error');
+    expect(body).toContain('after 1 retry');
+    expect(body).toContain('via #2');
+    expect(body).toContain('auth_error');
+  });
+
+  it('filters by free text across path, model and error code', async () => {
+    const w = await logPanel();
+    const filter = w.document.querySelector('#req-filter') as unknown as HTMLInputElement;
+
+    filter.value = '/v1/models';
+    filter.dispatchEvent(new w.Event('input') as never);
+    await vi.waitFor(() => expect(text(w)).not.toContain('/v1/chat/completions'));
+    expect(text(w)).toContain('/v1/models');
+
+    filter.value = 'upstream_error';
+    filter.dispatchEvent(new w.Event('input') as never);
+    await vi.waitFor(() => expect(text(w)).toContain('502'));
+    expect(text(w)).not.toContain('/v1/models');
+  });
+
+  it('filters by status chip and reports the shown count', async () => {
+    const w = await logPanel();
+    const chip = w.document.querySelector('.chip[data-status="server"]') as unknown as HTMLButtonElement;
+    chip.click();
+    await vi.waitFor(() => expect(text(w)).toContain('502'));
+    expect(text(w)).not.toContain('/v1/models');
+    expect(text(w)).toContain('1 of 3 shown');
+  });
+
+  it('distinguishes an empty filter result from an empty log', async () => {
+    const w = await logPanel();
+    const filter = w.document.querySelector('#req-filter') as unknown as HTMLInputElement;
+    filter.value = 'nothing-matches-this';
+    filter.dispatchEvent(new w.Event('input') as never);
+    // The log is not empty; the filter is. Saying so avoids looking broken.
+    await vi.waitFor(() => expect(text(w)).toContain('No requests match this filter'));
+    expect(text(w)).not.toContain('No requests recorded yet');
+  });
+
+  it('clears the filter from the empty state', async () => {
+    const w = await logPanel();
+    const filter = w.document.querySelector('#req-filter') as unknown as HTMLInputElement;
+    filter.value = 'nothing-matches-this';
+    filter.dispatchEvent(new w.Event('input') as never);
+    await vi.waitFor(() => expect(w.document.querySelector('#req-clear-2')).toBeTruthy());
+    (w.document.querySelector('#req-clear-2') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(text(w)).toContain('/v1/chat/completions'));
+  });
+
+  it('reports plainly when persisted history is turned off', async () => {
+    const w = await logPanel();
+    // The telemetry endpoint answers 503 on the file backend / when disabled.
+    (w.fetch as unknown as { mock?: unknown }) = (async (path: string) => {
+      if (path.includes('telemetry')) {
+        return { ok: false, status: 503, json: async () => ({ error: { message: 'Request telemetry persistence is disabled.' } }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({ recent: entries }) } as Response;
+    }) as never;
+
+    (w.document.querySelector('#history-load') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#history-body')?.textContent).toContain('telemetry persistence is disabled'));
+  });
+});
+
+/**
+ * Cooldown state was previously a static tag, so an account cooling down and an
+ * account that had never been used looked identical.
+ */
+describe('upstream account health', () => {
+  async function upstreamPanel(pool: unknown) {
+    const w = new Window({ url: 'http://127.0.0.1:8787/admin' });
+    windows.push(w);
+    w.fetch = (async (path: string) => {
+      const body = path.endsWith('/overview')
+        ? { ...overview, credential: { ok: true, source: 'pool', detail: 'token abc' }, pool }
+        : { recent: [] };
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }) as never;
+    w.document.write(adminPanelHtml());
+    w.eval(w.document.querySelector('script')!.textContent!);
+    (w.document.querySelector('#key-input') as unknown as HTMLInputElement).value = 'test-only-admin-key';
+    (w.document.querySelector('#key-submit') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#main h2')?.textContent).toBe('Overview'));
+    (w.document.querySelector('[data-view="upstream"]') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#acct-rows')).toBeTruthy());
+    return w;
+  }
+
+  it('explains a cooling account with its last error and a live countdown', async () => {
+    const w = await upstreamPanel({
+      size: 1, strategy: 'round-robin', accounts: [{ label: '#1', note: '', ok: false, detail: 'Web login' }],
+      health: {
+        size: 1, available: 0, unhealthy: 1, ready: false, state: 'unavailable', strategy: 'round-robin',
+        accounts: [{ label: '#1', state: 'cooling_down', failures: 2, last_error: 'HTTP 401', last_failure_at: Date.now(), cooldown_remaining_ms: 30_000 }],
+      },
+    });
+    const body = w.document.querySelector('#acct-rows')?.textContent ?? '';
+    expect(body).toContain('cooling down');
+    expect(body).toContain('HTTP 401');
+    expect(body).toContain('2 failures');
+    expect(body).toContain('retrying in');
+  });
+
+  it('does not invent a countdown for a healthy account', async () => {
+    const w = await upstreamPanel({
+      size: 1, strategy: 'round-robin', accounts: [{ label: '#1', note: '', ok: true, detail: 'Web login' }],
+      health: {
+        size: 1, available: 1, unhealthy: 0, ready: true, state: 'ready', strategy: 'round-robin',
+        accounts: [{ label: '#1', state: 'healthy', failures: 0 }],
+      },
+    });
+    const body = w.document.querySelector('#acct-rows')?.textContent ?? '';
+    expect(body).toContain('available');
+    // No remainder from the server means no countdown is rendered at all.
+    expect(body).not.toContain('retrying in');
+    expect(body).not.toContain('failures');
+  });
+});
+
+/**
+ * Keyboard shortcuts must never swallow ordinary typing. The filter is a text
+ * field on a page that also listens for bare letters, so "n" inside the input
+ * has to stay an "n".
+ */
+describe('keyboard shortcuts', () => {
+  async function panelWithRows() {
+    const w = new Window({ url: 'http://127.0.0.1:8787/admin' });
+    windows.push(w);
+    w.fetch = (async (path: string) => {
+      const body = path.endsWith('/requests')
+        ? { recent: [
+            { time: Date.now(), method: 'GET', path: '/v1/models', status: 200, stream: false, duration_ms: 1, attempts: 1, retries: 0 },
+            { time: Date.now(), method: 'POST', path: '/v1/chat/completions', status: 200, stream: false, duration_ms: 2, attempts: 1, retries: 0 },
+          ] }
+        : { ...overview, credential: { ok: true, source: 'pool', detail: '' } };
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }) as never;
+    w.document.write(adminPanelHtml());
+    w.eval(w.document.querySelector('script')!.textContent!);
+    (w.document.querySelector('#key-input') as unknown as HTMLInputElement).value = 'test-only-admin-key';
+    (w.document.querySelector('#key-submit') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#main h2')?.textContent).toBe('Overview'));
+    (w.document.querySelector('[data-view="requests"]') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(w.document.querySelector('#req-body table')).toBeTruthy());
+    return w;
+  }
+
+  const key = (w: Window, k: string) => w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }) as never);
+
+  it('focuses the filter with / and clears it with Escape', async () => {
+    const w = await panelWithRows();
+    key(w, '/');
+    const filter = w.document.querySelector('#req-filter') as unknown as HTMLInputElement;
+    expect(w.document.activeElement).toBe(filter);
+
+    filter.value = 'wb-2';
+    filter.dispatchEvent(new w.Event('input') as never);
+    await vi.waitFor(() => expect(filter.value).toBe('wb-2'));
+    key(w, 'Escape');
+    await vi.waitFor(() => expect(filter.value).toBe(''));
+  });
+
+  it('steps rows with n and p, and does not do so while typing', async () => {
+    const w = await panelWithRows();
+    key(w, 'n');
+    await vi.waitFor(() => expect(w.document.querySelectorAll('.row-focused')).toHaveLength(1));
+    key(w, 'p');
+    await vi.waitFor(() => expect(w.document.querySelectorAll('.row-focused')).toHaveLength(1));
+
+    // Focus the filter, then press n: it must not move the highlight.
+    const filter = w.document.querySelector('#req-filter') as unknown as HTMLInputElement;
+    filter.focus();
+    const before = w.document.querySelector('.row-focused');
+    key(w, 'n');
+    expect(w.document.querySelector('.row-focused')).toBe(before);
+  });
+});
+
+/**
+ * The panel states the log window in prose ("the most recent 200"). That number
+ * is duplicated from the metrics collector, so assert they agree: if the window
+ * changes and the copy does not, the page describes itself incorrectly.
+ */
+describe('log window copy', () => {
+  it('matches the window the metrics collector actually keeps', () => {
+    const metrics = createMetrics();
+    for (let i = 0; i < 260; i++) {
+      metrics.record({
+        method: 'GET', path: '/v1/models', status: 200, stream: false, duration_ms: 1,
+      });
+    }
+    const kept = metrics.snapshot().recent.length;
+    // The figure lives in the panel's inline script (the copy is assembled at
+    // runtime), not in the served markup, so inspect the script itself.
+    const script = adminPanelHtml().match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
+    expect(script).toContain(`var MAX_LOG = ${kept};`);
+    // Both sentences that mention the window must interpolate it rather than
+    // hardcode a number that could drift away from the collector.
+    expect(script).toContain("the most recent ' + MAX_LOG +");
+    expect(script).toContain("buffer holds ' + MAX_LOG +");
   });
 });
