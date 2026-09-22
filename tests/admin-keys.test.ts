@@ -420,3 +420,66 @@ describe('per-key usage attribution', () => {
     for (const key of body.keys) expect(key.hash).toBeUndefined();
   });
 });
+
+/**
+ * A client whose key stopped working is the failure an operator most needs to
+ * see, and it used to be the one failure the panel could not show: the auth
+ * guard runs before the request recorder, so rejections appeared in no request
+ * row, no error rate and no error-code histogram. The panel reported a healthy
+ * gateway while every call from that client failed.
+ */
+describe('rejected keys are observable', () => {
+  let h: Harness;
+
+  beforeEach(async () => { h = await makeHarness(); });
+  afterEach(async () => {
+    await h.app.close();
+    await rm(h.dir, { recursive: true, force: true });
+  });
+
+  const requests = async () => {
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/requests', headers: auth(ADMIN_KEY) });
+    expect(res.statusCode).toBe(200);
+    return (res.json() as { recent: Array<Record<string, unknown>> }).recent;
+  };
+
+  it('records a rejection in the request log with a matchable fragment', async () => {
+    const presented = 'wkb_' + 'Z'.repeat(32);
+    const res = await h.app.inject({
+      method: 'POST', url: '/v1/chat/completions',
+      headers: { authorization: `Bearer ${presented}` },
+      payload: { model: 'wb-2', messages: [{ role: 'user', content: 'hi' }] },
+    });
+    expect(res.statusCode).toBe(401);
+
+    const rows = await requests();
+    const row = rows.find((r) => r.status === 401);
+    expect(row).toBeTruthy();
+    expect(row!.error_code).toBe('invalid_api_key');
+    expect(row!.error_class).toBe('auth_error');
+    // Enough to match against the key list by eye, not enough to be the key.
+    expect(row!.key_prefix).toBe('wkb_ZZZZ');
+    expect(JSON.stringify(rows)).not.toContain(presented);
+  });
+
+  it('reports a missing credential differently from a wrong one', async () => {
+    await h.app.inject({ method: 'GET', url: '/v1/models' });
+    const rows = await requests();
+    const row = rows.find((r) => r.status === 401);
+    expect(row).toBeTruthy();
+    // No fragment means no key was sent at all, which is a different fix.
+    expect(row!.key_prefix).toBeUndefined();
+  });
+
+  it('surfaces the rejection in the error-code histogram', async () => {
+    await h.app.inject({
+      method: 'GET', url: '/v1/models',
+      headers: { authorization: 'Bearer ' + 'x'.repeat(40) },
+    });
+    const res = await h.app.inject({ method: 'GET', url: '/admin/api/overview', headers: auth(ADMIN_KEY) });
+    const stats = (res.json() as { stats: { error_codes: Array<{ code: string; count: number }>; total_errors: number } }).stats;
+    expect(stats.error_codes.some((e) => e.code === 'invalid_api_key')).toBe(true);
+    // A rejected call is a request the gateway handled, so it counts.
+    expect(stats.total_errors).toBeGreaterThan(0);
+  });
+});

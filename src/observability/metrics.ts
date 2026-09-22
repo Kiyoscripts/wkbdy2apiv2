@@ -27,6 +27,16 @@ export type RequestLogEntry = {
   account?: string;
   /** Downstream key fingerprint (never the key itself). */
   key_id?: string;
+  /**
+   * First characters of a rejected key, when one was presented.
+   *
+   * Recorded only for auth rejections, because that is the one case where the
+   * fingerprint cannot be looked up: the key is by definition not in the
+   * registry, so there is no name to show. The prefix is the same field the
+   * panel already displays for stored keys, which lets an operator match a
+   * rejected key against the key list by eye. Absent means no key was sent.
+   */
+  key_prefix?: string;
 };
 
 const MAX_LOG = 200;
@@ -105,6 +115,7 @@ export class MetricsCollector {
       ...(entry.error_class !== undefined ? { error_class: entry.error_class } : {}),
       ...(entry.account !== undefined ? { account: entry.account } : {}),
       ...(entry.key_id !== undefined ? { key_id: entry.key_id } : {}),
+      ...(entry.key_prefix !== undefined ? { key_prefix: entry.key_prefix } : {}),
       attempts: entry.attempts ?? 1,
       retries: entry.retries ?? Math.max(0, (entry.attempts ?? 1) - 1),
     };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { extractApiKey, isApiKeyValid, keyFingerprint, keyFingerprintFromHash } from '../src/security/downstream-auth.js';
-import { hashApiKey } from '../src/security/api-keys.js';
+import { extractApiKey, isApiKeyValid, keyFingerprint, keyFingerprintFromHash, maskedKeyPrefix } from '../src/security/downstream-auth.js';
+import { hashApiKey, keyPrefix } from '../src/security/api-keys.js';
 
 describe('downstream API-key normalization', () => {
   it.each([
@@ -55,5 +55,36 @@ describe('keyFingerprintFromHash', () => {
     expect(hash.startsWith(fp.replace('key_', ''))).toBe(true);
     // Only the 16-character prefix is exposed, matching keyFingerprint.
     expect(fp).toHaveLength('key_'.length + 16);
+  });
+});
+
+/**
+ * A rejected key is absent from the registry, so it has no name to report and
+ * the operator has nothing to match against the key list. The fragment exists
+ * for that, and must never become the secret itself.
+ */
+describe('maskedKeyPrefix', () => {
+  it('returns nothing for anything shorter than a real key', () => {
+    // A 9-character key would be disclosed entirely by a naive 12-char prefix.
+    for (const key of ['wrong-key', 'short', 'a'.repeat(23)]) {
+      expect(maskedKeyPrefix(key)).toBeUndefined();
+    }
+    expect(maskedKeyPrefix(undefined)).toBeUndefined();
+    expect(maskedKeyPrefix('')).toBeUndefined();
+  });
+
+  it('never returns the whole key, even at the boundary', () => {
+    // 24 is the shortest maskable value; 8 characters must still be a fragment.
+    const shortest = 'a'.repeat(24);
+    expect(maskedKeyPrefix(shortest)).toBe('a'.repeat(8));
+    expect(maskedKeyPrefix(shortest)).not.toBe(shortest);
+  });
+
+  it('returns a comparable fragment for a real issued key', () => {
+    const key = 'wkb_K41B4UvjgyUTm54BPUssffAY20NloGne';
+    expect(maskedKeyPrefix(key)).toBe('wkb_K41B');
+    // The panel identifies stored keys by their first 12 characters, so the
+    // fragment has to be a prefix of that to be matchable by eye.
+    expect(keyPrefix(key).startsWith(maskedKeyPrefix(key)!)).toBe(true);
   });
 });

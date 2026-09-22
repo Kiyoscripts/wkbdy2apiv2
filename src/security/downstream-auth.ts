@@ -40,6 +40,32 @@ export function keyFingerprintFromHash(hash: string | undefined): string | undef
   return 'key_' + hash.slice(0, 16);
 }
 
+/**
+ * A short, human-comparable fragment of a presented key, safe to record.
+ *
+ * Only auth rejections need this, because a rejected key is absent from the
+ * registry and therefore has no name to report. The fragment is what an
+ * operator compares by eye against the key list, whose entries are identified
+ * by their own leading characters.
+ *
+ * It is deliberately not `keyPrefix`, which returns the first 12 characters:
+ * for a key shorter than that, it returns the whole secret, and even for a
+ * 13-character key it would disclose almost all of it. Two rules keep this safe
+ * by construction rather than by convention:
+ *
+ *  - Nothing is returned below {@link MIN_MASKABLE_LENGTH}. Shorter values are
+ *    not keys this gateway issued (generated keys are 36 characters), so a
+ *    fragment of one would be both useless and disproportionate.
+ *  - At most {@link MASK_LENGTH} characters come back, which for any eligible
+ *    key leaves the overwhelming majority of its entropy unrecorded.
+ */
+const MASK_LENGTH = 8;
+const MIN_MASKABLE_LENGTH = 24;
+export function maskedKeyPrefix(key: string | undefined): string | undefined {
+  if (!key || key.length < MIN_MASKABLE_LENGTH) return undefined;
+  return key.slice(0, MASK_LENGTH);
+}
+
 export type ApiKeyHeaders = {
   authorization?: string | string[];
   'x-api-key'?: string | string[];

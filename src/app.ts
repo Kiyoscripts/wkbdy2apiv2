@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { extractApiKey, isApiKeyValid, keyFingerprint } from './security/downstream-auth.js';
+import { extractApiKey, isApiKeyValid, keyFingerprint, maskedKeyPrefix } from './security/downstream-auth.js';
 import type { ApiKeyRegistry } from './security/api-keys.js';
 import { createRateLimiter, type RateLimitConfig } from './security/rate-limit.js';
 import { applyRateLimit } from './routes/request-context.js';
@@ -108,15 +108,40 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     const auth = extractApiKey(req.headers);
     const verified = auth.conflicting ? { ok: false as const } : opts.apiKeys.verify(auth.value);
     if (!verified.ok) {
-      // Header names and request ID are safe; never log the secret values.
+      const reason = auth.conflicting ? 'conflicting_headers' : auth.value ? 'invalid_value' : 'missing';
+      // Header names and request ID are safe; never log the secret values. A
+      // masked fragment of the rejected key is recorded because a rejected key
+      // is by definition absent from the registry, so it has no name to report;
+      // maskedKeyPrefix guarantees the fragment can never be the whole key.
+      const rejectedPrefix = maskedKeyPrefix(auth.value);
       console.warn(JSON.stringify({
         time: new Date().toISOString(),
         msg: 'downstream API key rejected',
         request_id: req.id,
         path,
-        reason: auth.conflicting ? 'conflicting_headers' : auth.value ? 'invalid_value' : 'missing',
+        reason,
+        ...(rejectedPrefix ? { presented_key_prefix: rejectedPrefix } : {}),
         credential_headers: auth.sources,
       }));
+      // Rejections are recorded so the panel can show them. Without this the
+      // one failure an operator most needs to see — a client whose key stopped
+      // working — is the only one that never appears in the request log, the
+      // error rate, or the error-code histogram, and the panel reports a
+      // healthy gateway while every call from that client fails.
+      opts.metrics.record({
+        request_id: String(req.id),
+        method: req.method,
+        path,
+        status: 401,
+        stream: false,
+        duration_ms: 0,
+        error_code: 'invalid_api_key',
+        error_class: 'auth_error',
+        ...(auth.value ? { key_id: keyFingerprint(auth.value) } : {}),
+        ...(rejectedPrefix ? { key_prefix: rejectedPrefix } : {}),
+        attempts: 1,
+        retries: 0,
+      });
       reply.header('x-request-id', req.id);
       if (isMessages) return reply.code(401).send(anthropicError(401, 'Invalid or missing gateway API key.', req.id));
       const error = openAiError(401, 'invalid_api_key', 'Invalid or missing API key.');

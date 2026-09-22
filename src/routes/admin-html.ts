@@ -1385,6 +1385,14 @@ td .muted { color: var(--text-tertiary); }
     if (r.error_class || r.error_code) {
       parts.push('<span class="detail-error">' + escapeHtml([r.error_class, r.error_code].filter(Boolean).join(' · ')) + '</span>');
     }
+    // A rejected key cannot be named (it is not in the registry), so the prefix
+    // is shown for comparison against the key list. Its absence means the
+    // request carried no credential at all, which is a different fix.
+    if (r.status === 401 && r.error_code === 'invalid_api_key') {
+      parts.push(r.key_prefix
+        ? 'presented key ' + escapeHtml(r.key_prefix) + '… does not match any stored key'
+        : 'no key presented');
+    }
     if (r.retries > 0) parts.push(escapeHtml(r.retries === 1 ? 'after 1 retry' : 'after ' + r.retries + ' retries'));
     if (r.account) parts.push('via ' + escapeHtml(r.account));
     return parts.length ? '<div class="cell-sub">' + parts.join(' · ') + '</div>' : '';

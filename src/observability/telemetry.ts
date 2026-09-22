@@ -87,6 +87,7 @@ const requestSchema = z.object({
   error_class: z.string().optional(),
   account: z.string().optional(),
   key_id: z.string().optional(),
+  key_prefix: z.string().optional(),
   client_ip: z.string().optional(),
   user_agent: z.string().optional(),
 });
@@ -243,6 +244,7 @@ export function toTelemetryRecord(
     ...(entry.error_class !== undefined ? { error_class: entry.error_class } : {}),
     ...(entry.account !== undefined ? { account: entry.account } : {}),
     ...(entry.key_id !== undefined ? { key_id: entry.key_id } : {}),
+    ...(entry.key_prefix !== undefined ? { key_prefix: entry.key_prefix } : {}),
     ...(extra.attempts !== undefined ? { attempts: extra.attempts } : {}),
     ...(extra.retries !== undefined ? { retries: extra.retries } : {}),
     ...(extra.error_class !== undefined ? { error_class: extra.error_class } : {}),
